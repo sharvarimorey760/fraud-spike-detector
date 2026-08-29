@@ -2,7 +2,8 @@
 The core agent: takes one flagged transaction, investigates it using
 tool-calling (multi-turn), and returns a bounded decision + reasoning.
 
-Requires ANTHROPIC_API_KEY to be set in the environment.
+Uses Google's Gemini API with function calling.
+Requires GEMINI_API_KEY to be set in the environment.
 
 Usage:
     python agent_loop.py --event_index 0 --flagged ../detection/flagged_events.csv --data ../data/transactions.csv
@@ -13,8 +14,9 @@ import json
 import os
 import sys
 
-import anthropic
 import pandas as pd
+from google import genai
+from google.genai import types
 
 from tools import TOOL_SCHEMA, TOOL_DISPATCH, load_dataset
 from prompts import SYSTEM_PROMPT, build_investigation_prompt
@@ -23,43 +25,56 @@ sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from guardrails.risk_gate import apply_guardrails  # noqa: E402
 from audit_log.logger import log_decision  # noqa: E402
 
-MODEL = "claude-sonnet-4-6"
+MODEL = "gemini-2.5-flash"
 MAX_TOOL_TURNS = 5
 
-
-def run_agent(client: anthropic.Anthropic, event: dict) -> dict:
-    messages = [
-        {"role": "user", "content": build_investigation_prompt(event)}
+# Wrap our plain-dict tool schema into Gemini's Tool/FunctionDeclaration objects
+GEMINI_TOOLS = types.Tool(
+    function_declarations=[
+        types.FunctionDeclaration(
+            name=t["name"],
+            description=t["description"],
+            parameters=t["parameters"],
+        )
+        for t in TOOL_SCHEMA
     ]
+)
+
+
+def run_agent(client: genai.Client, event: dict) -> dict:
+    chat = client.chats.create(
+        model=MODEL,
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            tools=[GEMINI_TOOLS],
+        ),
+    )
+
+    response = chat.send_message(build_investigation_prompt(event))
 
     for _ in range(MAX_TOOL_TURNS):
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=1024,
-            system=SYSTEM_PROMPT,
-            tools=TOOL_SCHEMA,
-            messages=messages,
-        )
+        function_calls = [
+            part.function_call
+            for part in response.candidates[0].content.parts
+            if getattr(part, "function_call", None)
+        ]
 
-        # If the model wants to call tools, execute them and loop again
-        tool_calls = [b for b in response.content if b.type == "tool_use"]
-        if tool_calls:
-            messages.append({"role": "assistant", "content": response.content})
-            tool_results = []
-            for call in tool_calls:
+        if function_calls:
+            function_response_parts = []
+            for call in function_calls:
                 fn = TOOL_DISPATCH.get(call.name)
-                result = fn(call.input) if fn else {"error": f"unknown tool {call.name}"}
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": call.id,
-                    "content": json.dumps(result),
-                })
-            messages.append({"role": "user", "content": tool_results})
+                result = fn(dict(call.args)) if fn else {"error": f"unknown tool {call.name}"}
+                function_response_parts.append(
+                    types.Part.from_function_response(
+                        name=call.name,
+                        response={"result": result},
+                    )
+                )
+            response = chat.send_message(function_response_parts)
             continue
 
-        # No more tool calls — extract the final text/JSON decision
-        text_blocks = [b.text for b in response.content if b.type == "text"]
-        final_text = "\n".join(text_blocks).strip()
+        # No more function calls — extract the final text/JSON decision
+        final_text = response.text.strip() if response.text else ""
         return parse_decision(final_text)
 
     return {
@@ -107,12 +122,12 @@ if __name__ == "__main__":
     parser.add_argument("--all", action="store_true", help="process every flagged event")
     args = parser.parse_args()
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        print("ERROR: set ANTHROPIC_API_KEY in your environment before running the agent.")
+        print("ERROR: set GEMINI_API_KEY in your environment before running the agent.")
         sys.exit(1)
 
-    client = anthropic.Anthropic(api_key=api_key)
+    client = genai.Client(api_key=api_key)
     load_dataset(args.data)  # for tools.py to query merchant/device history
 
     flagged_df = pd.read_csv(args.flagged)
