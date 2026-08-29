@@ -27,7 +27,7 @@ recommend a bounded, explainable action.
    [flagged events]
           |
           v
-[Investigation Agent]  <-- Claude, tool-calling loop
+[Investigation Agent]  <-- Gemini, tool-calling loop
    (agent/)               tools: get_merchant_history,
                                   get_device_pattern,
                                   get_similar_past_cases
@@ -66,7 +66,7 @@ directly produce an unbounded action like closing an account.
 git clone <this-repo>
 cd fraud-spike-detector
 pip install -r requirements.txt
-export ANTHROPIC_API_KEY=your_key_here
+export GEMINI_API_KEY=your_key_here
 ```
 
 ## Running the pipeline
