@@ -1,7 +1,7 @@
 """
 Tools the fraud-investigation agent can call to gather context before
 making a decision. Each tool queries the transaction dataset (a stand-in
-for what would be live DB/API calls against payments platform's systems ).
+for what would be live DB/API calls against a payments platform's systems).
 """
 
 import pandas as pd
@@ -67,12 +67,14 @@ def get_similar_past_cases(fraud_type_hint: str, limit: int = 5) -> dict:
     }
 
 
-# Tool schema exposed to the LLM via the Anthropic API tool-calling interface
+# Tool schema exposed to the LLM via Gemini's function-calling interface.
+# Gemini takes function declarations (name/description/parameters using
+# OpenAPI-style JSON schema) grouped under a single Tool object.
 TOOL_SCHEMA = [
     {
         "name": "get_merchant_history",
         "description": "Get summary transaction stats for a merchant, to check whether this event fits their normal pattern.",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {"merchant_id": {"type": "string"}},
             "required": ["merchant_id"],
@@ -81,7 +83,7 @@ TOOL_SCHEMA = [
     {
         "name": "get_device_pattern",
         "description": "Get telemetry history for a device (retry counts, ping gaps, firmware, cities seen) to check for spoofing or tampering signals.",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {"device_id": {"type": "string"}},
             "required": ["device_id"],
@@ -90,7 +92,7 @@ TOOL_SCHEMA = [
     {
         "name": "get_similar_past_cases",
         "description": "Retrieve past confirmed fraud cases matching a suspected pattern type (card_testing, device_spoof, bust_out, retry_storm) to compare the current event against known examples.",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "fraud_type_hint": {
