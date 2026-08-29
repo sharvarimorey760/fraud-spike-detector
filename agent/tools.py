@@ -1,7 +1,7 @@
 """
 Tools the fraud-investigation agent can call to gather context before
 making a decision. Each tool queries the transaction dataset (a stand-in
-for what would be live DB/API calls against Razorpay's systems).
+for what would be live DB/API calls against payments platform's systems ).
 """
 
 import pandas as pd
