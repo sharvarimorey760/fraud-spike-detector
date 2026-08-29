@@ -1,6 +1,5 @@
 # Fraud-Spike Detector — Device-Telemetry-Aware Fraud Investigation Agent
 
-Built for the Razorpay AI Buildathon 2026 — Risk & Fraud track.
 
 ## Problem
 
@@ -135,12 +134,4 @@ triage.
   point, not tuned against real cost-of-error data.
 
 ## Why this project, why this framing
-
-I come from an IIoT background (RTOS, UART/SPI protocols) rather than pure
-software — so instead of treating a payment terminal as a black box that just
-emits a transaction, I treated it as a device with its own health signals.
-Retry counts and ping-gap anomalies are the kind of thing that shows up in
-embedded systems debugging, not typical fraud-analytics training data, and
-they turned out to be genuinely useful fraud signal here (the retry_storm and
-device_spoof patterns are both invisible if you only look at transaction
-amount and timestamp).
+I come from an IIoT background, so I naturally think about systems not just in terms of the data they produce, but also in terms of how the underlying device behaves. That led me to treat the payment terminal as more than just a transaction source and instead use its own health signals—such as retry counts, ping gaps, uptime, and firmware changes—as additional fraud signals. These device-level patterns can reveal issues that transaction data alone may miss, such as retry storms or device spoofing. That IIoT perspective is what shaped the way I approached fraud investigation in this project.
