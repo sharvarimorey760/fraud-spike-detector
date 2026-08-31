@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 import pandas as pd
 from google import genai
@@ -25,7 +26,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from guardrails.risk_gate import apply_guardrails  # noqa: E402
 from audit_log.logger import log_decision  # noqa: E402
 
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-3.5-flash-lite"
 MAX_TOOL_TURNS = 5
 
 # Wrap our plain-dict tool schema into Gemini's Tool/FunctionDeclaration objects
@@ -120,6 +121,8 @@ if __name__ == "__main__":
     parser.add_argument("--data", type=str, default="../data/transactions.csv")
     parser.add_argument("--event_index", type=int, default=0)
     parser.add_argument("--all", action="store_true", help="process every flagged event")
+    parser.add_argument("--limit", type=int, default=None,
+                         help="with --all, only process this many events (useful to stay within free-tier quota)")
     args = parser.parse_args()
 
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -133,8 +136,14 @@ if __name__ == "__main__":
     flagged_df = pd.read_csv(args.flagged)
 
     if args.all:
-        for _, row in flagged_df.iterrows():
+        # Free-tier Gemini quota is limited to 5 requests/minute — pace calls
+        # to stay under that instead of firing them all at once.
+        events_to_process = flagged_df.head(args.limit) if args.limit else flagged_df
+        for i, (_, row) in enumerate(events_to_process.iterrows()):
+            if i > 0:
+                time.sleep(10)  # each investigation makes several internal calls; stay under 15 RPM
             decision = process_event(client, row.to_dict())
+            print(f"--- event {i} ---")
             print(json.dumps(decision, indent=2))
     else:
         event = flagged_df.iloc[args.event_index].to_dict()
