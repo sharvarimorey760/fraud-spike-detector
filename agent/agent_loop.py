@@ -16,6 +16,7 @@ The AI recommends an action; guardrails remain the final safety layer.
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -60,6 +61,55 @@ def _load_configured_model():
 
 MODEL = _load_configured_model()
 MAX_TOOL_TURNS = 5
+
+# Gemini free-tier quota is ~15 generate_content requests per minute; a
+# batch run makes 2+ calls per event (investigator + critic), so bursts
+# exceed it. Retry on 429 instead of crashing the whole batch.
+MAX_SEND_ATTEMPTS = 6
+
+
+def _is_rate_limited(exc: Exception) -> bool:
+    """True for Gemini 429 quota errors (RESOURCE_EXHAUSTED)."""
+    text = str(exc)
+    return "429" in text or "RESOURCE_EXHAUSTED" in text
+
+
+def _retry_wait_seconds(exc: Exception, fallback: float = 60.0) -> float:
+    """Prefer the server-suggested delay ('Please retry in 43.9s')."""
+    match = re.search(r"retry in ([\d.]+)s", str(exc))
+    if match:
+        return min(float(match.group(1)) + 2.0, 180.0)
+    return fallback
+
+
+def send_with_retry(chat, message):
+    """Send a chat message, retrying on Gemini 429 rate limits and 503s.
+
+    On 429 we sleep the server-suggested delay and retry rather than
+    letting the quota error kill the entire --all batch.
+    """
+    for attempt in range(MAX_SEND_ATTEMPTS):
+        try:
+            return chat.send_message(message)
+        except Exception as exc:
+            if _is_rate_limited(exc):
+                wait = _retry_wait_seconds(exc)
+                print(
+                    f"... 429 rate limit (attempt {attempt + 1}/"
+                    f"{MAX_SEND_ATTEMPTS}), waiting {wait:.0f}s "
+                    f"before retrying",
+                    flush=True,
+                )
+                time.sleep(wait)
+            elif "503" in str(exc):
+                if attempt == MAX_SEND_ATTEMPTS - 1:
+                    raise
+                time.sleep(5 * (attempt + 1))
+            else:
+                raise
+    raise RuntimeError(
+        "Repeated 429 rate limits; giving up on this event."
+    )
 
 
 GEMINI_TOOLS = types.Tool(
@@ -236,17 +286,10 @@ def run_agent(client: genai.Client, event: dict) -> dict:
         ),
     )
 
-    # 503 retry fix only
-    for attempt in range(3):
-        try:
-            response = chat.send_message(
-                build_investigation_prompt(enriched_event)
-            )
-            break
-        except Exception as exc:
-            if "503" not in str(exc) or attempt == 2:
-                raise
-            time.sleep(5 * (attempt + 1))
+    response = send_with_retry(
+        chat,
+        build_investigation_prompt(enriched_event),
+    )
 
     for _ in range(MAX_TOOL_TURNS):
         if not response.candidates:
@@ -287,17 +330,10 @@ def run_agent(client: genai.Client, event: dict) -> dict:
                     )
                 )
 
-            # 503 retry fix only
-            for attempt in range(3):
-                try:
-                    response = chat.send_message(
-                        function_response_parts
-                    )
-                    break
-                except Exception as exc:
-                    if "503" not in str(exc) or attempt == 2:
-                        raise
-                    time.sleep(5 * (attempt + 1))
+            response = send_with_retry(
+                chat,
+                function_response_parts,
+            )
 
             continue
 
@@ -341,20 +377,13 @@ def run_critic(
         ),
     )
 
-    # 503 retry fix only
-    for attempt in range(3):
-        try:
-            response = chat.send_message(
-                build_critic_prompt(
-                    event,
-                    investigator_decision,
-                )
-            )
-            break
-        except Exception as exc:
-            if "503" not in str(exc) or attempt == 2:
-                raise
-            time.sleep(5 * (attempt + 1))
+    response = send_with_retry(
+        chat,
+        build_critic_prompt(
+            event,
+            investigator_decision,
+        ),
+    )
 
     text = response.text.strip() if response.text else ""
     return parse_critic_verdict(text)
@@ -589,6 +618,13 @@ if __name__ == "__main__":
         help="Seconds to wait between events in --all mode (rate-limit pacing).",
     )
 
+    parser.add_argument(
+        "--start",
+        type=int,
+        default=0,
+        help="Skip the first N flagged events (resume an interrupted --all run).",
+    )
+
     args = parser.parse_args()
 
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -621,7 +657,10 @@ if __name__ == "__main__":
     if args.all:
         limit = max(0, args.limit)
         delay = max(0.0, args.delay)
-        events = flagged_df.iloc[:limit] if limit else flagged_df
+        start = max(0, args.start)
+        events = flagged_df.iloc[start:]
+        if limit:
+            events = events.iloc[:limit]
 
         for i, (_, row) in enumerate(events.iterrows()):
             decision = process_event(
