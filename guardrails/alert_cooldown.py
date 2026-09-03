@@ -18,9 +18,41 @@ import json
 import os
 from datetime import datetime, timezone
 
-COOLDOWN_MINUTES = 15
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config.json")
+
+DEFAULT_COOLDOWN_MINUTES = 15
 STATE_CLEANUP_HOURS = 24
 STATE_PATH = os.path.join(os.path.dirname(__file__), "..", "audit_log", "alert_state.json")
+
+
+def _load_config() -> dict:
+    """Read config.json (written by the dashboard's Settings tab)."""
+    if not os.path.exists(CONFIG_PATH):
+        return {}
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def cooldown_minutes() -> int:
+    """
+    Cooldown window from config.json's cooldown_minutes, floored at 1
+    minute, falling back to the default on bad input.
+
+    Read per call (not at import time) so a live dashboard picks up
+    Settings changes without a process restart.
+    """
+    try:
+        return max(1, int(
+            _load_config().get(
+                "cooldown_minutes",
+                DEFAULT_COOLDOWN_MINUTES,
+            )
+        ))
+    except (TypeError, ValueError):
+        return DEFAULT_COOLDOWN_MINUTES
 
 STRONG_ACTIONS = {"escalate", "soft_hold"}
 ACTION_SEVERITY = {
@@ -83,6 +115,8 @@ def apply_cooldown(decision: dict, event: dict) -> dict:
     key = _key(device_id, merchant_id)
     amount = float(event.get("transaction_amount", 0) or 0)
 
+    cooldown = cooldown_minutes()
+
     now = datetime.now(timezone.utc)
     raw_state = _load_state()
     state = _cleanup_old_entries(raw_state, now)
@@ -96,9 +130,9 @@ def apply_cooldown(decision: dict, event: dict) -> dict:
             last_fired = datetime.fromisoformat(last_fired_str)
             elapsed_minutes = (now - last_fired).total_seconds() / 60.0
         except ValueError:
-            elapsed_minutes = COOLDOWN_MINUTES + 1
+            elapsed_minutes = cooldown + 1
 
-        if elapsed_minutes < COOLDOWN_MINUTES:
+        if elapsed_minutes < cooldown:
             is_severity_escalation = ACTION_SEVERITY.get(action, 0) > ACTION_SEVERITY.get(last_action, 0)
 
             if not is_severity_escalation:
@@ -110,7 +144,7 @@ def apply_cooldown(decision: dict, event: dict) -> dict:
                 decision["recommended_action"] = "flag_for_review"
                 decision["alert_status"] = "suppressed_duplicate"
                 decision["alert_cooldown_note"] = (
-                    f"Ongoing incident active for {elapsed_minutes:.1f} min (cooldown: {COOLDOWN_MINUTES} min). "
+                    f"Ongoing incident active for {elapsed_minutes:.1f} min (cooldown: {cooldown} min). "
                     f"Suppressed duplicate #{incident['suppressed_count']} ({action.upper()}). "
                     f"Cumulative incident volume: ₹{incident['total_amount_inr']:,.0f}. "
                     f"Downgraded to flag_for_review to prevent alert fatigue."
@@ -140,13 +174,13 @@ def apply_cooldown(decision: dict, event: dict) -> dict:
         decision["alert_cooldown_note"] = (
             f"Severity escalation: this incident already had {previous_suppressed} "
             f"suppressed alert(s) totaling ₹{previous_total:,.0f} before this "
-            f"{action.upper()} broke through the {COOLDOWN_MINUTES}-minute cooldown. "
+            f"{action.upper()} broke through the {cooldown}-minute cooldown. "
             f"Cumulative incident volume is now ₹{new_total:,.0f}."
         )
     else:
         decision["alert_cooldown_note"] = (
             f"Real-time alert {action.upper()} dispatched. "
-            f"Cooldown window active for {COOLDOWN_MINUTES}m."
+            f"Cooldown window active for {cooldown}m."
         )
 
     return decision

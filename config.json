@@ -1,0 +1,6 @@
+{
+  "model": "gemini-3.5-flash-lite",
+  "contamination": 0.10,
+  "cooldown_minutes": 15,
+  "min_escalate_confidence": 0.85
+}

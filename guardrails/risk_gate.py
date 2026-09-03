@@ -6,11 +6,19 @@ can ever execute an unsafe, unexplainable, or unbounded financial action.
 
 Enforcements:
 1. Vocabulary Gating: Actions, risk levels, and fraud types must strictly match whitelist.
-2. Confidence Gates: Strict threshold gates for soft_hold and escalate.
+2. Confidence Gates: Strict threshold gates for soft_hold and escalate (the escalate
+   threshold is configurable via config.json's min_escalate_confidence).
 3. Financial Circuit Breaker: High-value transactions (₹25,000+) can NEVER be auto-dismissed.
 4. Risk Telemetry Cross-Validation: High deterministic risk scores (75+) override AI dismissals.
 5. Remediation Guarantee: Every actionable decision must have a concrete, human-executable next step.
 """
+
+import json
+import os
+
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "config.json")
+
+DEFAULT_MIN_CONFIDENCE_FOR_ESCALATE = 0.85
 
 ALLOWED_ACTIONS = {
     "flag_for_review",
@@ -42,7 +50,37 @@ STRONG_ACTIONS = {"escalate", "soft_hold"}
 # Confidence Thresholds
 MIN_CONFIDENCE_FOR_STRONG_ACTION = 0.50
 MIN_CONFIDENCE_FOR_SOFT_HOLD = 0.70
-MIN_CONFIDENCE_FOR_ESCALATE = 0.85
+
+
+def _load_config() -> dict:
+    """Read config.json (written by the dashboard's Settings tab)."""
+    if not os.path.exists(CONFIG_PATH):
+        return {}
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def min_confidence_for_escalate() -> float:
+    """
+    Escalate threshold from config.json's min_escalate_confidence,
+    clamped to [0, 1], falling back to the default on bad input.
+
+    Read per call (not at import time) so a live dashboard picks up
+    Settings changes without a process restart.
+    """
+    try:
+        value = float(
+            _load_config().get(
+                "min_escalate_confidence",
+                DEFAULT_MIN_CONFIDENCE_FOR_ESCALATE,
+            )
+        )
+        return max(0.0, min(1.0, value))
+    except (TypeError, ValueError):
+        return DEFAULT_MIN_CONFIDENCE_FOR_ESCALATE
 
 # Financial Circuit Breaker Threshold (INR)
 CIRCUIT_BREAKER_AMOUNT_INR = 25000.0
@@ -60,9 +98,13 @@ def safe_confidence(value) -> float:
     return max(0.0, min(1.0, conf))
 
 
-def calculate_risk_level(confidence: float, action: str) -> str:
+def calculate_risk_level(
+    confidence: float,
+    action: str,
+    min_confidence_for_escalate: float = DEFAULT_MIN_CONFIDENCE_FOR_ESCALATE,
+) -> str:
     """Derive consistent risk tier from confidence and proposed action."""
-    if action == "escalate" or confidence >= 0.85:
+    if action == "escalate" or confidence >= min_confidence_for_escalate:
         return "critical"
     if action == "soft_hold" or confidence >= 0.70:
         return "high"
@@ -80,6 +122,8 @@ def apply_guardrails(decision: dict, event: dict = None) -> dict:
         decision = {}
 
     violations = []
+
+    escalate_threshold = min_confidence_for_escalate()
 
     # -------------------------------------------------------------
     # 1. Validate & Normalize Confidence
@@ -118,8 +162,8 @@ def apply_guardrails(decision: dict, event: dict = None) -> dict:
         violations.append(f"Confidence {confidence:.2f} < {MIN_CONFIDENCE_FOR_SOFT_HOLD:.2f} for soft_hold → 'flag_for_review'")
         action = "flag_for_review"
 
-    if action == "escalate" and confidence < MIN_CONFIDENCE_FOR_ESCALATE:
-        violations.append(f"Confidence {confidence:.2f} < {MIN_CONFIDENCE_FOR_ESCALATE:.2f} for escalate → 'flag_for_review'")
+    if action == "escalate" and confidence < escalate_threshold:
+        violations.append(f"Confidence {confidence:.2f} < {escalate_threshold:.2f} for escalate → 'flag_for_review'")
         action = "flag_for_review"
 
     # -------------------------------------------------------------
@@ -181,7 +225,11 @@ def apply_guardrails(decision: dict, event: dict = None) -> dict:
     # -------------------------------------------------------------
     # 9. Risk Tier Consistency & Human Review Lock
     # -------------------------------------------------------------
-    decision["risk_level"] = calculate_risk_level(confidence, action)
+    decision["risk_level"] = calculate_risk_level(
+        confidence,
+        action,
+        escalate_threshold,
+    )
     decision["recommended_action"] = action
 
     # Mandatory human review for all actions except justified low-risk dismissals

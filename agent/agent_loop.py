@@ -33,6 +33,12 @@ from prompts import (
 )
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+from env_loader import load_dotenv  # noqa: E402
+
+# Load GEMINI_API_KEY (and any other secrets) from the project's .env
+# file, if present. Real environment variables are never overridden.
+load_dotenv()
+
 from guardrails.risk_gate import apply_guardrails  # noqa: E402
 from guardrails.alert_cooldown import apply_cooldown  # noqa: E402
 from audit_log.logger import log_decision  # noqa: E402
@@ -205,6 +211,12 @@ def normalize_decision(decision: dict) -> dict:
         "critic_summary",
         "alert_status",
         "alert_cooldown_note",
+        # Guardrail enforcement must survive into the audit trail: the
+        # circuit-breaker override reason and the final risk tier are
+        # exactly what a reviewer needs to see, so never drop them.
+        "risk_level",
+        "guardrail_status",
+        "guardrail_violations",
     ]:
         if field in decision:
             normalized[field] = decision[field]
@@ -317,19 +329,26 @@ def run_critic(
     investigator_decision: dict,
 ) -> dict:
 
+    # Use the chat API (like the investigator) rather than
+    # Models.generate_content: the SDK warns against direct AFC-style
+    # generate_content calls. No tools are passed, so the critic still
+    # cannot call anything — it only reviews the given decision.
+    chat = client.chats.create(
+        model=MODEL,
+        config=types.GenerateContentConfig(
+            system_instruction=CRITIC_SYSTEM_PROMPT,
+            temperature=0.1,
+        ),
+    )
+
     # 503 retry fix only
     for attempt in range(3):
         try:
-            response = client.models.generate_content(
-                model=MODEL,
-                contents=build_critic_prompt(
+            response = chat.send_message(
+                build_critic_prompt(
                     event,
                     investigator_decision,
-                ),
-                config=types.GenerateContentConfig(
-                    system_instruction=CRITIC_SYSTEM_PROMPT,
-                    temperature=0.1,
-                ),
+                )
             )
             break
         except Exception as exc:
@@ -501,7 +520,13 @@ def process_event(client, event: dict) -> dict:
         enriched_event.get("reason_codes", []),
     )
 
-    decision = apply_guardrails(decision)
+    # Pass the enriched event so the guardrail layer can enforce the
+    # financial circuit breaker: a high-value transaction (>= ₹25k)
+    # must never be auto-dismissed even if the AI recommends it.
+    decision = apply_guardrails(
+        decision,
+        enriched_event,
+    )
     decision = apply_cooldown(
         decision,
         enriched_event,
@@ -517,6 +542,13 @@ def process_event(client, event: dict) -> dict:
 
 
 if __name__ == "__main__":
+
+    # The default Windows console (cp1252) cannot encode characters like
+    # ₹ that can appear in decision content — force UTF-8 output so the
+    # CLI runs unchanged on any platform.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
@@ -541,6 +573,20 @@ if __name__ == "__main__":
         "--all",
         action="store_true",
         help="Process every flagged event.",
+    )
+
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Max events to process in --all mode (0 = no limit).",
+    )
+
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=2.0,
+        help="Seconds to wait between events in --all mode (rate-limit pacing).",
     )
 
     args = parser.parse_args()
@@ -573,7 +619,11 @@ if __name__ == "__main__":
         sys.exit(0)
 
     if args.all:
-        for _, row in flagged_df.iterrows():
+        limit = max(0, args.limit)
+        delay = max(0.0, args.delay)
+        events = flagged_df.iloc[:limit] if limit else flagged_df
+
+        for i, (_, row) in enumerate(events.iterrows()):
             decision = process_event(
                 client,
                 row.to_dict(),
@@ -586,6 +636,10 @@ if __name__ == "__main__":
                     default=str,
                 )
             )
+
+            if i < len(events) - 1 and delay > 0:
+                print(f"... waiting {delay}s before next event (rate-limit pacing)")
+                time.sleep(delay)
 
     else:
         if args.event_index >= len(flagged_df):

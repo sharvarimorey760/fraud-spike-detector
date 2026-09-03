@@ -25,6 +25,7 @@ Usage:
 import argparse
 import json
 import os
+import sys
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import IsolationForest
@@ -93,6 +94,50 @@ def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
 # Temporal features
 # ---------------------------------------------------------------------
 
+def _trailing_window_counts(timestamps, window: pd.Timedelta) -> np.ndarray:
+    """
+    Vectorized replacement for the previous per-timestamp O(n^2) loops.
+
+    For each row, count how many rows in the (sorted) group fall within
+    [ts - window, ts] inclusive — identical semantics to the old
+    comparison loop, including duplicate timestamps — computed in
+    O(n log n) per group via binary search.
+
+    Rows with NaT timestamps get a count of 0 (they never matched the
+    old window comparisons either, and they never counted toward other
+    rows' windows).
+    """
+    if isinstance(timestamps, pd.Series):
+        ts_series = timestamps
+    else:
+        ts_series = pd.Series(timestamps)
+
+    # numpy datetime64 has no timezone support, but prepare_data parses
+    # timestamps with utc=True, so dropping the tz to naive UTC keeps
+    # the same instants while producing a plain datetime64[ns] array.
+    if getattr(ts_series.dtype, "tz", None) is not None:
+        ts_series = ts_series.dt.tz_convert(None)
+
+    ts = np.asarray(ts_series, dtype="datetime64[ns]")
+    win_ns = window.to_timedelta64().astype("int64")
+
+    out = np.zeros(len(ts), dtype=float)
+
+    valid = ~np.isnat(ts)
+
+    if not valid.all():
+        ts = ts[valid].astype("int64")
+        starts = np.searchsorted(ts, ts - win_ns, side="left")
+        ends = np.searchsorted(ts, ts, side="right")
+        out[valid] = ends - starts
+        return out
+
+    ts = ts.astype("int64")
+    starts = np.searchsorted(ts, ts - win_ns, side="left")
+    ends = np.searchsorted(ts, ts, side="right")
+    return (ends - starts).astype(float)
+
+
 def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Calculate transaction velocity for each device and merchant.
@@ -101,114 +146,53 @@ def add_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
       - card testing bursts
       - sudden merchant activity
       - compromised terminals
+
+    Windows are computed per group with binary search (O(n log n))
+    instead of per-timestamp comparison loops (O(n^2)), so this scales
+    to large datasets.
     """
 
     df = df.copy()
 
     df = df.sort_values("timestamp")
 
-    # Device-level velocity
-    device_groups = df.set_index("timestamp").groupby("device_id")
-
-    df["burst_count_5min"] = (
-        device_groups["transaction_amount"]
-        .rolling("5min")
-        .count()
-        .reset_index(level=0, drop=True)
-        .reindex(df.set_index("timestamp").index)
-        .values
-    )
-
-    # The operation above can become difficult to align when timestamps
-    # repeat, so calculate using a robust per-device rolling approach.
-    df["burst_count_5min"] = 1.0
-
-    for device_id, indices in df.groupby("device_id").groups.items():
-        group = df.loc[indices].sort_values("timestamp")
-
-        timestamps = group["timestamp"]
-        counts = []
-
-        for current_time in timestamps:
-            start_time = current_time - pd.Timedelta(minutes=5)
-            count = (
-                (timestamps >= start_time)
-                & (timestamps <= current_time)
-            ).sum()
-
-            counts.append(count)
-
-        df.loc[group.index, "burst_count_5min"] = counts
-
-    # 15-minute device velocity
-    df["velocity_15min"] = 1.0
-
-    for device_id, indices in df.groupby("device_id").groups.items():
-        group = df.loc[indices].sort_values("timestamp")
-        timestamps = group["timestamp"]
-
-        counts = []
-
-        for current_time in timestamps:
-            start_time = current_time - pd.Timedelta(minutes=15)
-
-            count = (
-                (timestamps >= start_time)
-                & (timestamps <= current_time)
-            ).sum()
-
-            counts.append(count)
-
-        df.loc[group.index, "velocity_15min"] = counts
-
-    # Merchant 15-minute velocity
-    df["merchant_velocity_15min"] = 1.0
-
-    for merchant_id, indices in df.groupby("merchant_id").groups.items():
-        group = df.loc[indices].sort_values("timestamp")
-        timestamps = group["timestamp"]
-
-        counts = []
-
-        for current_time in timestamps:
-            start_time = current_time - pd.Timedelta(minutes=15)
-
-            count = (
-                (timestamps >= start_time)
-                & (timestamps <= current_time)
-            ).sum()
-
-            counts.append(count)
-
-        df.loc[group.index, "merchant_velocity_15min"] = counts
-
-    # -------------------------------------------------------------
-    # Multi-window device velocity: 1h / 6h / 24h
+    # Device-level windows: 5-min burst, 15-min velocity, plus the
+    # wider 1h / 6h / 24h counts.
     #
     # A single 5-min burst window catches fast card-testing attacks
     # but misses slower-moving abuse — a device making an unusual
     # number of transactions spread over several hours never trips a
     # 5-min threshold but can still be well outside its own normal
     # pattern. These wider windows catch that.
-    # -------------------------------------------------------------
-    for label, minutes in [("1h", 60), ("6h", 360), ("24h", 1440)]:
-        col = f"device_count_{label}"
-        df[col] = 1.0
+    device_windows = [
+        ("burst_count_5min", pd.Timedelta(minutes=5)),
+        ("velocity_15min", pd.Timedelta(minutes=15)),
+        ("device_count_1h", pd.Timedelta(minutes=60)),
+        ("device_count_6h", pd.Timedelta(minutes=360)),
+        ("device_count_24h", pd.Timedelta(minutes=1440)),
+    ]
 
-        for device_id, indices in df.groupby("device_id").groups.items():
+    # Merchant-level window.
+    merchant_windows = [
+        ("merchant_velocity_15min", pd.Timedelta(minutes=15)),
+    ]
+
+    def _assign_window_counts(group_key_col: str, windows: list):
+        for col, _ in windows:
+            df[col] = 1.0
+
+        for key, indices in df.groupby(group_key_col).groups.items():
             group = df.loc[indices].sort_values("timestamp")
-            timestamps = group["timestamp"]
-            counts = []
+            ts = group["timestamp"].to_numpy()
 
-            for current_time in timestamps:
-                start_time = current_time - pd.Timedelta(minutes=minutes)
-                count = (
-                    (timestamps >= start_time)
-                    & (timestamps <= current_time)
-                ).sum()
-                counts.append(count)
+            for col, window in windows:
+                df.loc[group.index, col] = _trailing_window_counts(
+                    ts,
+                    window,
+                )
 
-            df.loc[group.index, col] = counts
+    _assign_window_counts("device_id", device_windows)
+    _assign_window_counts("merchant_id", merchant_windows)
 
     return df.reset_index(drop=True)
 
@@ -757,6 +741,12 @@ def score(
 # ---------------------------------------------------------------------
 
 if __name__ == "__main__":
+
+    # The default Windows console (cp1252) cannot encode characters used
+    # in the summary output (→, ₹) and would crash mid-print — force
+    # UTF-8 output so the CLI runs unchanged on any platform.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     parser = argparse.ArgumentParser()
 

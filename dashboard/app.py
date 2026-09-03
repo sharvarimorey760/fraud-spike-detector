@@ -6,6 +6,7 @@ Run:
     streamlit run app.py
 """
 
+import glob
 import json
 import os
 import re
@@ -32,6 +33,12 @@ else:
 
 sys.path.append(os.path.join(BASE_DIR, "agent"))
 sys.path.append(BASE_DIR)
+
+from env_loader import load_dotenv  # noqa: E402
+
+# Load GEMINI_API_KEY (and any other secrets) from the project's .env
+# file, if present. Real environment variables are never overridden.
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 try:
     from audit_log.logger import read_recent_logs, get_pending_review, mark_reviewed
@@ -80,6 +87,125 @@ def embed_iframe(html_code: str, height: int = 380):
     is not available on all versions)."""
     import streamlit.components.v1 as components
     components.html(html_code, height=height)
+
+
+_VOICE_MIC_TEMPLATE = """
+<div id="mic-wrap" style="display:flex;flex-direction:column;align-items:center;gap:4px;height:100%;padding-top:14px;">
+  <button id="mic-btn" title="Search by voice" type="button" style="
+      width:40px;height:40px;border-radius:50%;flex-shrink:0;
+      background:#0B131E;border:1px solid #162436;color:#00D9FF;
+      font-size:17px;cursor:pointer;display:flex;align-items:center;justify-content:center;
+      transition:all .15s ease;">🎤</button>
+  <span id="mic-status" style="font-size:11px;color:#64748B;font-family:Inter,sans-serif;"></span>
+</div>
+<script>
+(function() {
+  const btn = document.getElementById('mic-btn');
+  const status = document.getElementById('mic-status');
+  const targetLabel = "__TARGET_LABEL__";
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  function setStatus(text, color) {
+    status.textContent = text;
+    status.style.color = color || '#FACC15';
+    btn.title = text;
+  }
+
+  if (!SpeechRecognition) {
+    setStatus('Voice fill needs Chrome or Edge', '#FF4D67');
+    btn.disabled = true;
+    btn.style.opacity = 0.4;
+    return;
+  }
+
+  const recognition = new SpeechRecognition();
+  recognition.lang = 'en-IN';
+  recognition.continuous = false;
+  recognition.interimResults = false;
+
+  let listening = false;
+
+  function findTargetInput() {
+    const parentDoc = window.parent.document;
+    const labels = Array.from(parentDoc.querySelectorAll('label'));
+    const match = labels.find(l => l.textContent.trim() === targetLabel);
+    if (!match) return null;
+    const container = match.closest('div[data-testid="stTextInput"]') || match.closest('div[class*="stTextInput"]') || match.parentElement.parentElement;
+    return container ? container.querySelector('input') : null;
+  }
+
+  btn.addEventListener('click', () => {
+    if (listening) return;
+    setStatus('Tap Allow when the browser asks', '#94A3B8');
+    try { recognition.start(); } catch (e) { /* already starting */ }
+  });
+
+  recognition.onstart = () => {
+    listening = true;
+    btn.style.background = '#FF4D67';
+    btn.style.borderColor = '#FF4D67';
+    setStatus('Listening... speak now', '#00D9FF');
+  };
+
+  recognition.onerror = (e) => {
+    const friendly = {
+      'not-allowed': 'Mic blocked - click the padlock in the address bar and allow Microphone',
+      'not-found': 'No microphone found on this device',
+      'audio-capture': 'No microphone found on this device',
+      'no-speech': 'No speech heard - check the mic and retry',
+      'network': 'Speech service busy - retry',
+      'service-not-allowed': 'Speech service busy - retry',
+      'language-not-supported': 'Language unsupported - retry',
+    }[e.error] || ('Mic error: ' + e.error);
+    setStatus(friendly, '#FF4D67');
+  };
+
+  recognition.onend = () => {
+    listening = false;
+    btn.style.background = '#0B131E';
+    btn.style.borderColor = '#162436';
+  };
+
+  recognition.onresult = (event) => {
+    const transcript = event.results[0][0].transcript;
+
+    const input = findTargetInput();
+    if (!input) {
+      setStatus('Could not find the target field', '#FF4D67');
+      return;
+    }
+
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      window.parent.HTMLInputElement.prototype, 'value'
+    ).set;
+    nativeSetter.call(input, transcript);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    setStatus('Filled ✓', '#22C55E');
+
+    setTimeout(() => {
+      input.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true
+      }));
+    }, 60);
+  };
+})();
+</script>
+"""
+
+
+def render_voice_search_mic(target_label: str, height: int = 96):
+    """Mic button using the browser's built-in Web Speech API
+    (webkitSpeechRecognition — Chrome/Edge only, no backend, no API key).
+
+    It reaches into the parent Streamlit document to locate the
+    st.text_input by its visible label, writes the transcript into it
+    via the native input value setter (so React notices the change),
+    then fires a synthetic Enter keypress so Streamlit commits the
+    value and reruns — exactly as if the user had typed and pressed
+    Enter themselves.
+    """
+    html_code = _VOICE_MIC_TEMPLATE.replace("__TARGET_LABEL__", target_label)
+    embed_iframe(html_code, height=height)
 
 
 # ============================================================
@@ -765,6 +891,19 @@ def risk_tier_counts(flagged_df: pd.DataFrame) -> dict:
     return counts
 
 
+def _discover_csv_files() -> list:
+    """Find CSV files already present in the project's data folders."""
+    patterns = [
+        os.path.join(BASE_DIR, "data", "*.csv"),
+        os.path.join(BASE_DIR, "detection", "*.csv"),
+        os.path.join(BASE_DIR, "dashboard", "*.csv"),
+    ]
+    paths = []
+    for pattern in patterns:
+        paths.extend(glob.glob(pattern))
+    return sorted(set(paths))
+
+
 # ============================================================
 # SIDEBAR
 # ============================================================
@@ -1141,16 +1280,19 @@ elif nav_option == "🚩 Flagged Events":
 
         total_records = len(view)
 
-        f1, f2, f3 = st.columns([1.2, 2.2, 0.6])
+        f1, f2, f3, f4 = st.columns([1.2, 2.0, 0.4, 0.5])
         with f1:
             tier_options = sorted(view[tier_col].astype(str).str.upper().unique()) if tier_col else []
             selected_tiers = st.multiselect("Filter Risk Tier", tier_options, default=tier_options)
         with f2:
+            search_label = "Search Merchant, Device, Transaction ID"
             search_query = st.text_input(
-                "Search Merchant, Device, Transaction ID",
-                placeholder="Type and press Enter...",
+                search_label,
+                placeholder="Type, press Enter, or tap 🎤...",
             )
         with f3:
+            render_voice_search_mic(search_label)
+        with f4:
             st.write("")
             st.write("")
             if st.button("Reset", use_container_width=True):
@@ -1241,6 +1383,7 @@ elif nav_option == "📜 Audit Log":
 elif nav_option == "🔍 Single Investigation":
     st.markdown("## 🔍 Live Multi-Agent Investigation")
     st.caption("Runs the full pipeline: local risk enrichment → investigator agent → critic agent → guardrails → audit trail.")
+    st.caption("🎤 Voice fill works in Chrome/Edge — the first time you click a mic, the browser asks for Microphone access. Click **Allow**.")
 
     api_key = os.environ.get("GEMINI_API_KEY")
     try:
@@ -1252,14 +1395,28 @@ elif nav_option == "🔍 Single Investigation":
     with st.form("single_form"):
         c1, c2 = st.columns(2)
         with c1:
-            dev_id = st.text_input("Device ID", "POS-TESTDEVICE")
-            merch_id = st.text_input("Merchant ID", "MER-TESTMERCH")
+            # Voice fill for the free-text fields (🎤 uses the same Web
+            # Speech API mic as the Flagged Events search).
+            d1, mic1 = st.columns([5, 1])
+            with d1:
+                dev_id = st.text_input("Device ID", "POS-TESTDEVICE")
+            with mic1:
+                render_voice_search_mic("Device ID")
+            d2, mic2 = st.columns([5, 1])
+            with d2:
+                merch_id = st.text_input("Merchant ID", "MER-TESTMERCH")
+            with mic2:
+                render_voice_search_mic("Merchant ID")
             amount = st.number_input("Transaction Amount (₹)", min_value=0.0, value=500.0)
             retries = st.number_input("Retry Count", min_value=0, value=0, step=1)
         with c2:
             uptime = st.number_input("Device Uptime (hrs)", min_value=0.0, value=200.0)
             ping = st.number_input("Last Ping Gap (sec)", min_value=0.0, value=1.5)
-            city = st.text_input("Location", "Mumbai")
+            d3, mic3 = st.columns([5, 1])
+            with d3:
+                city = st.text_input("Location", "Mumbai")
+            with mic3:
+                render_voice_search_mic("Location")
             ip_flag = st.selectbox("IP Consistency", [1, 0], index=0)
 
         submitted = st.form_submit_button("🧠 Launch AI Multi-Agent Investigation", use_container_width=True)
@@ -1319,9 +1476,14 @@ elif nav_option == "🔍 Single Investigation":
 # ============================================================
 elif nav_option == "⚡ Batch Investigation":
     st.markdown("## ⚡ Batch Investigation")
-    st.caption("Upload a CSV of transactions, or run against the currently flagged set.")
+    st.caption("Upload a CSV, pick an existing one, or run against the currently flagged set.")
+    st.caption("🎤 The mic fills the CSV-path field — Chrome/Edge only, and the browser must be allowed Microphone access.")
 
-    source = st.radio("Batch source", ["Upload CSV", "Use current flagged events"], horizontal=True)
+    source = st.radio(
+        "Batch source",
+        ["Upload CSV", "Select existing CSV", "Use current flagged events"],
+        horizontal=True,
+    )
 
     batch_df = None
     if source == "Upload CSV":
@@ -1329,6 +1491,35 @@ elif nav_option == "⚡ Batch Investigation":
         if uploaded:
             batch_df = pd.read_csv(uploaded)
             st.success(f"Loaded {len(batch_df)} transactions from file.")
+    elif source == "Select existing CSV":
+        known_csvs = _discover_csv_files()
+        st.caption("Pick a CSV already in the project, or type a full path to any file on disk.")
+        picked = st.selectbox(
+            "CSV file",
+            known_csvs or ["(no CSVs found in project)"],
+        )
+        p1, mic_path = st.columns([5, 1])
+        with p1:
+            custom_path = st.text_input("Or enter a CSV path", value="")
+        with mic_path:
+            render_voice_search_mic("Or enter a CSV path")
+
+        chosen = custom_path.strip()
+        if not chosen and picked and picked != "(no CSVs found in project)":
+            chosen = picked
+
+        if chosen:
+            if os.path.exists(chosen):
+                try:
+                    batch_df = pd.read_csv(chosen)
+                    st.success(
+                        f"Loaded {len(batch_df)} transactions from "
+                        f"{os.path.basename(chosen)}."
+                    )
+                except Exception as exc:
+                    st.error(f"Could not read {chosen}: {exc}")
+            else:
+                st.warning(f"File not found: {chosen}")
     else:
         if not df_flagged.empty:
             batch_df = df_flagged
@@ -1514,6 +1705,8 @@ elif nav_option == "⚙️ Settings":
         save_config(new_cfg)
         st.success(
             f"Saved to config.json. Next run of anomaly_scorer.py will use "
-            f"contamination={contamination}, and agent_loop.py will use model='{model_choice}'."
+            f"contamination={contamination}, agent_loop.py will use model='{model_choice}', "
+            f"and the guardrail/cooldown layers will require ≥ {min_escalate_conf} "
+            f"confidence to escalate with a {cooldown_mins}-minute alert cooldown."
         )
         st.json(new_cfg)

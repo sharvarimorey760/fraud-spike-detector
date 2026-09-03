@@ -456,11 +456,19 @@ def get_merchant_device_network(
             "network_risk": "low",
         }
 
-    suspicious_mask = (
-        (rows["retry_count"].fillna(0) >= 6)
-        | (rows["last_ping_gap_sec"].fillna(0) >= 8)
-        | (rows.get("ip_consistency_flag", 1).fillna(1) == 0)
-    )
+    retry_mask = rows["retry_count"].fillna(0) >= 6
+    ping_mask = rows["last_ping_gap_sec"].fillna(0) >= 8
+
+    if "ip_consistency_flag" in rows.columns:
+        suspicious_mask = (
+            retry_mask
+            | ping_mask
+            | (rows["ip_consistency_flag"].fillna(1) == 0)
+        )
+    else:
+        # Column may be absent on schema drift — never call .fillna on a
+        # bare int default (that crashes); just skip the IP signal.
+        suspicious_mask = retry_mask | ping_mask
 
     suspicious_devices = (
         rows.loc[suspicious_mask, "device_id"]
@@ -591,6 +599,10 @@ TOOL_SCHEMA = [
                         "device_spoof",
                         "bust_out",
                         "retry_storm",
+                        "velocity_attack",
+                        "coordinated_fraud",
+                        "unusual_behavior",
+                        "unclear",
                     ],
                 }
             },

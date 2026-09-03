@@ -65,7 +65,23 @@ directly produce an unbounded action like closing an account.
 git clone <this-repo>
 cd fraud-spike-detector
 pip install -r requirements.txt
-export GEMINI_API_KEY=your_key_here
+
+# Create a .env file with your Gemini API key (auto-loaded by the
+# agent CLI and the dashboard — no manual export needed):
+echo "GEMINI_API_KEY=your_key_here" > .env
+```
+
+The key is also picked up if you export it in your shell (`export
+GEMINI_API_KEY=...`) — a real environment variable always takes
+precedence over the `.env` file, and `.env` is git-ignored so your key
+never gets committed.
+
+## Running the tests
+
+```bash
+pytest
+# or, without pytest:
+python -m unittest discover -s tests -t . -v
 ```
 
 ## Running the pipeline
@@ -85,6 +101,9 @@ python agent_loop.py --event_index 0
 
 # Or process every flagged event:
 python agent_loop.py --all
+
+# Limit the batch and pace calls to stay within API rate limits:
+python agent_loop.py --all --limit 5 --delay 2
 
 # 4. View everything in the dashboard
 cd ../dashboard

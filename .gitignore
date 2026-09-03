@@ -1,7 +1,15 @@
 __pycache__/
 *.pyc
 .env
-audit_log/decisions.jsonl
+
+# Generated / runtime artifacts (never commit these)
 *.csv
 !data/sample_transactions_head.csv
+audit_log/decisions.jsonl
+audit_log/alert_state.json
+audit_log/reviewed.json
+agent/output.txt
+
+# Local-only files
+*.lnk
 .streamlit/
