@@ -1,42 +1,200 @@
 """
-Guardrail layer. This is deliberately NOT the LLM's job — it's a hard,
-code-level gate that runs after the agent's decision, so a bad model
-output can never directly produce an unbounded action.
+Guardrail Layer — Hard Safety Boundaries & Policy Enforcement.
 
-This is what makes the pipeline "bounded and gated" rather than trusting
-the agent's output outright.
+This code-level security gate guarantees that no LLM hallucination or prompt injection
+can ever execute an unsafe, unexplainable, or unbounded financial action.
+
+Enforcements:
+1. Vocabulary Gating: Actions, risk levels, and fraud types must strictly match whitelist.
+2. Confidence Gates: Strict threshold gates for soft_hold and escalate.
+3. Financial Circuit Breaker: High-value transactions (₹25,000+) can NEVER be auto-dismissed.
+4. Risk Telemetry Cross-Validation: High deterministic risk scores (75+) override AI dismissals.
+5. Remediation Guarantee: Every actionable decision must have a concrete, human-executable next step.
 """
 
-ALLOWED_ACTIONS = {"flag_for_review", "soft_hold", "escalate", "dismiss"}
+ALLOWED_ACTIONS = {
+    "flag_for_review",
+    "soft_hold",
+    "escalate",
+    "dismiss",
+}
 
-# Actions strong enough that they require confidence above this bar,
-# regardless of what the agent claims.
+ALLOWED_RISK_LEVELS = {
+    "low",
+    "medium",
+    "high",
+    "critical",
+}
+
+ALLOWED_FRAUD_TYPES = {
+    "card_testing",
+    "device_spoof",
+    "bust_out",
+    "retry_storm",
+    "velocity_attack",
+    "coordinated_fraud",
+    "unusual_behavior",
+    "unclear",
+}
+
 STRONG_ACTIONS = {"escalate", "soft_hold"}
-MIN_CONFIDENCE_FOR_STRONG_ACTION = 0.5
+
+# Confidence Thresholds
+MIN_CONFIDENCE_FOR_STRONG_ACTION = 0.50
+MIN_CONFIDENCE_FOR_SOFT_HOLD = 0.70
+MIN_CONFIDENCE_FOR_ESCALATE = 0.85
+
+# Financial Circuit Breaker Threshold (INR)
+CIRCUIT_BREAKER_AMOUNT_INR = 25000.0
+
+# Telemetry Risk Threshold that blocks auto-dismissal
+CRITICAL_TELEMETRY_RISK_THRESHOLD = 75.0
 
 
-def apply_guardrails(decision: dict) -> dict:
-    action = decision.get("recommended_action", "flag_for_review")
-    confidence = decision.get("confidence", 0.0)
+def safe_confidence(value) -> float:
+    """Convert confidence safely between 0.0 and 1.0."""
+    try:
+        conf = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(1.0, conf))
+
+
+def calculate_risk_level(confidence: float, action: str) -> str:
+    """Derive consistent risk tier from confidence and proposed action."""
+    if action == "escalate" or confidence >= 0.85:
+        return "critical"
+    if action == "soft_hold" or confidence >= 0.70:
+        return "high"
+    if action == "flag_for_review" or confidence >= 0.45:
+        return "medium"
+    return "low"
+
+
+def apply_guardrails(decision: dict, event: dict = None) -> dict:
+    """
+    Apply hard deterministic safety policies to the AI decision.
+    Ensures that an AI hallucination cannot silently approve or misclassify high-risk events.
+    """
+    if not isinstance(decision, dict):
+        decision = {}
 
     violations = []
 
-    # 1. Action must be one of the allowed, bounded set — no "block_account",
-    #    no "ban_merchant", nothing outside the defined vocabulary.
+    # -------------------------------------------------------------
+    # 1. Validate & Normalize Confidence
+    # -------------------------------------------------------------
+    original_conf = decision.get("confidence", 0.0)
+    confidence = safe_confidence(original_conf)
+    if confidence != original_conf:
+        violations.append(f"Normalized malformed confidence '{original_conf}' → {confidence:.2f}")
+    decision["confidence"] = confidence
+
+    # -------------------------------------------------------------
+    # 2. Whitelist Fraud Type
+    # -------------------------------------------------------------
+    fraud_type = str(decision.get("fraud_type_guess", "unclear")).strip().lower()
+    if fraud_type not in ALLOWED_FRAUD_TYPES:
+        violations.append(f"Non-whitelisted fraud type '{fraud_type}' → set to 'unclear'")
+        fraud_type = "unclear"
+    decision["fraud_type_guess"] = fraud_type
+
+    # -------------------------------------------------------------
+    # 3. Whitelist Proposed Action
+    # -------------------------------------------------------------
+    action = str(decision.get("recommended_action", "flag_for_review")).strip().lower()
     if action not in ALLOWED_ACTIONS:
-        violations.append(f"'{action}' is not an allowed action; downgraded to 'flag_for_review'.")
+        violations.append(f"Invalid action '{action}' → downgraded to 'flag_for_review'")
         action = "flag_for_review"
 
-    # 2. Strong actions require sufficient confidence, enforced in code
-    #    (not just asked for in the prompt).
-    if action in STRONG_ACTIONS and confidence < MIN_CONFIDENCE_FOR_STRONG_ACTION:
+    # -------------------------------------------------------------
+    # 4. Confidence-Based Action Gating
+    # -------------------------------------------------------------
+    if confidence < MIN_CONFIDENCE_FOR_STRONG_ACTION and action in STRONG_ACTIONS:
+        violations.append(f"Confidence {confidence:.2f} < {MIN_CONFIDENCE_FOR_STRONG_ACTION:.2f}: '{action}' → 'flag_for_review'")
+        action = "flag_for_review"
+
+    if action == "soft_hold" and confidence < MIN_CONFIDENCE_FOR_SOFT_HOLD:
+        violations.append(f"Confidence {confidence:.2f} < {MIN_CONFIDENCE_FOR_SOFT_HOLD:.2f} for soft_hold → 'flag_for_review'")
+        action = "flag_for_review"
+
+    if action == "escalate" and confidence < MIN_CONFIDENCE_FOR_ESCALATE:
+        violations.append(f"Confidence {confidence:.2f} < {MIN_CONFIDENCE_FOR_ESCALATE:.2f} for escalate → 'flag_for_review'")
+        action = "flag_for_review"
+
+    # -------------------------------------------------------------
+    # 5. Financial Circuit Breaker (High-Value Safeguard)
+    # -------------------------------------------------------------
+    txn_amount = 0.0
+    if event and isinstance(event, dict):
+        txn_amount = float(event.get("transaction_amount", 0) or 0)
+    elif "transaction_amount" in decision:
+        txn_amount = float(decision.get("transaction_amount", 0) or 0)
+
+    if txn_amount >= CIRCUIT_BREAKER_AMOUNT_INR and action == "dismiss":
         violations.append(
-            f"Confidence {confidence} below {MIN_CONFIDENCE_FOR_STRONG_ACTION} "
-            f"threshold for '{action}'; downgraded to 'flag_for_review'."
+            f"Circuit Breaker Triggered: Amount ₹{txn_amount:,.0f} ≥ ₹{CIRCUIT_BREAKER_AMOUNT_INR:,.0f}. "
+            f"Cannot auto-dismiss high-value transaction. Overridden to 'flag_for_review'."
         )
         action = "flag_for_review"
 
+    # -------------------------------------------------------------
+    # 6. Telemetry Risk Score Cross-Validation
+    # -------------------------------------------------------------
+    risk_score = float(decision.get("risk_score", 0) or decision.get("local_risk_score", 0) or 0)
+    if risk_score >= CRITICAL_TELEMETRY_RISK_THRESHOLD and action == "dismiss":
+        violations.append(
+            f"Telemetry Conflict: Deterministic risk score ({risk_score:.0f}/100) indicates elevated danger. "
+            f"AI 'dismiss' overridden to 'flag_for_review'."
+        )
+        action = "flag_for_review"
+
+    # -------------------------------------------------------------
+    # 7. Evidence Array Validation
+    # -------------------------------------------------------------
+    evidence = decision.get("evidence", [])
+    if not isinstance(evidence, list):
+        violations.append("Evidence was not a list; wrapped into fallback list")
+        evidence = [str(evidence)] if evidence else []
+
+    cleaned_evidence = [str(item).strip() for item in evidence if str(item).strip()]
+    if not cleaned_evidence:
+        cleaned_evidence = ["Telemetry features evaluated by anomaly scorer; no specific tool evidence cited."]
+        if action in STRONG_ACTIONS:
+            violations.append(f"Missing structured evidence: strong action '{action}' downgraded to 'flag_for_review'")
+            action = "flag_for_review"
+    decision["evidence"] = cleaned_evidence
+
+    # -------------------------------------------------------------
+    # 8. Remediation Next-Step Guarantee
+    # -------------------------------------------------------------
+    remediation = str(decision.get("recommended_remediation", "")).strip()
+    if not remediation or len(remediation) < 10 or "review" == remediation.lower():
+        if action == "escalate":
+            remediation = "Temporarily suspend POS terminal payouts and contact merchant manager to verify terminal integrity."
+        elif action == "soft_hold":
+            remediation = "Place a 30-minute hold on transaction batch and issue an SMS/OTP verification challenge to the cardholder."
+        else:
+            remediation = "Inspect merchant retry history over the last 3 hours to verify whether velocity matches regular peaks."
+        decision["recommended_remediation"] = remediation
+
+    # -------------------------------------------------------------
+    # 9. Risk Tier Consistency & Human Review Lock
+    # -------------------------------------------------------------
+    decision["risk_level"] = calculate_risk_level(confidence, action)
     decision["recommended_action"] = action
+
+    # Mandatory human review for all actions except justified low-risk dismissals
+    decision["human_review_required"] = (
+        action in {"escalate", "soft_hold", "flag_for_review"} or
+        risk_score >= 50 or
+        txn_amount >= CIRCUIT_BREAKER_AMOUNT_INR
+    )
+
+    # -------------------------------------------------------------
+    # 10. Audit Meta
+    # -------------------------------------------------------------
     decision["guardrail_violations"] = violations
-    decision["human_review_required"] = action in {"escalate", "soft_hold"}
+    decision["guardrail_status"] = "adjusted" if violations else "passed"
+
     return decision
