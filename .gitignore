@@ -5,6 +5,8 @@ __pycache__/
 # Generated / runtime artifacts (never commit these)
 *.csv
 !data/sample_transactions_head.csv
+# Demo data so the deployed dashboard has flagged events
+!detection/flagged_events.csv
 audit_log/decisions.jsonl
 audit_log/alert_state.json
 audit_log/reviewed.json
