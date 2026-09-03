@@ -84,7 +84,14 @@ pytest
 python -m unittest discover -s tests -t . -v
 ```
 
+The suite is fully hermetic (no API calls or keys) and runs on GitHub
+Actions via `.github/workflows/ci.yml` on every push and pull request.
+
 ## Running the pipeline
+
+The repo ships demo data (`data/transactions.csv` and
+`detection/flagged_events.csv`) so the dashboard works out of the box;
+regenerate it any time with:
 
 ```bash
 # 1. Generate synthetic transaction + telemetry data
@@ -105,9 +112,30 @@ python agent_loop.py --all
 # Limit the batch and pace calls to stay within API rate limits:
 python agent_loop.py --all --limit 5 --delay 2
 
+# Resume an interrupted batch exactly where it stopped (no duplicates):
+python agent_loop.py --all --start 95 --delay 10
+
 # 4. View everything in the dashboard
 cd ../dashboard
 streamlit run app.py
+```
+
+**Gemini free-tier rate limits:** the free tier allows roughly 15
+requests/minute and 500 requests/day for `gemini-3.5-flash-lite`. The
+agent retries 429s automatically (waiting the server-suggested delay),
+and each event costs 2+ calls (investigator + critic), so use
+`--delay 10` or higher for long batches and `--start N` to resume after
+the daily quota resets.
+
+## Audit report
+
+Every decision is logged to `audit_log/decisions.jsonl` (append-only,
+git-ignored). Summarize the log as markdown at any time:
+
+```bash
+python audit_log/summary_report.py                # print to console
+python audit_log/summary_report.py --out report.md
+python audit_log/summary_report.py --since 2026-09-03T16:00  # subset
 ```
 
 ## Example: detector performance (honest metrics)
@@ -139,6 +167,21 @@ triage.
 }
 ```
 
+## Deploy to Streamlit Cloud
+
+1. Open [share.streamlit.io](https://share.streamlit.io) and sign in with GitHub.
+2. **New app** → select the repo, branch `main`, main file path `dashboard/app.py` → **Deploy**.
+3. After the first build, open **Advanced settings → Secrets** and add:
+
+```
+GEMINI_API_KEY = "your_key_here"
+```
+
+The dashboard already falls back to `st.secrets` when no environment
+variable is set. Note that on the free tier the container filesystem is
+ephemeral — `audit_log/` and `config.json` changes reset on restart; the
+committed demo data keeps the dashboard fully populated regardless.
+
 ## Known limitations / what I'd improve with more time
 
 - Data is synthetic. Real fraud patterns are noisier and more adversarial —
@@ -150,6 +193,10 @@ triage.
   review aren't fed back to retrain the anomaly scorer.
 - Guardrail thresholds (0.5 confidence cutoff) are a reasonable starting
   point, not tuned against real cost-of-error data.
+- The Gemini free tier caps usage at ~500 requests/day, so a full
+  400-event batch takes a couple of days of resuming (`--start N`) or a
+  paid API tier. The batch pipeline handles per-minute throttling
+  automatically, but the daily cap requires waiting for the reset.
 
 ## Why this project, why this framing
 
