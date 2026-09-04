@@ -1,80 +1,84 @@
 # Fraud-Spike Detector — Audit Log Report
 
-_Generated 2026-09-04 02:38 UTC from 142 logged decision(s)_
+_Generated 2026-09-04 11:54 UTC from 258 logged decision(s)_
 
 ## Headline
 
-- **Decisions logged:** 142
-- **Strong actions taken (soft_hold/escalate):** 50 (35.2%)
-- **Routed to human review:** 133 (93.7%)
-- **Guardrail-adjusted decisions:** 25 (17.6%) — 81 passed clean
-- **Average confidence:** 0.550
+- **Decisions logged:** 258
+- **Strong actions taken (soft_hold/escalate):** 66 (25.6%)
+- **Routed to human review:** 233 (90.3%)
+- **Guardrail-adjusted decisions:** 39 (15.1%) — 183 passed clean
+- **Average confidence:** 0.488
 
 ## Recommended actions
 
 | Action | Count | Share |
 |---|---|---|
-| `flag_for_review` | 83 | 58.5% |
-| `soft_hold` | 47 | 33.1% |
-| `dismiss` | 9 | 6.3% |
-| `escalate` | 3 | 2.1% |
+| `flag_for_review` | 167 | 64.7% |
+| `soft_hold` | 63 | 24.4% |
+| `dismiss` | 25 | 9.7% |
+| `escalate` | 3 | 1.2% |
 
 ## Risk levels
 
 | Level | Count | Share |
 |---|---|---|
-| medium | 66 | 46.5% |
-| None | 36 | 25.4% |
-| high | 36 | 25.4% |
-| low | 3 | 2.1% |
-| critical | 1 | 0.7% |
+| medium | 139 | 53.9% |
+| high | 65 | 25.2% |
+| None | 36 | 14.0% |
+| low | 17 | 6.6% |
+| critical | 1 | 0.4% |
 
 ## Fraud patterns identified
 
 | Pattern | Count | Share |
 |---|---|---|
-| `velocity_attack` | 49 | 34.5% |
-| `card_testing` | 39 | 27.5% |
-| `unclear` | 36 | 25.4% |
-| `retry_storm` | 16 | 11.3% |
-| `device_spoof` | 1 | 0.7% |
-| `unusual_behavior` | 1 | 0.7% |
+| `unclear` | 81 | 31.4% |
+| `card_testing` | 75 | 29.1% |
+| `velocity_attack` | 63 | 24.4% |
+| `unusual_behavior` | 19 | 7.4% |
+| `retry_storm` | 18 | 7.0% |
+| `device_spoof` | 1 | 0.4% |
+| `bust_out` | 1 | 0.4% |
 
 ## Safety layer
 
 | Signal | Count |
 |---|---|
-| Guardrails passed | 81 |
-| Guardrails adjusted | 25 |
-| Critic confirmed | 95 |
-| Critic escalated to human | 12 |
+| Guardrails passed | 183 |
+| Guardrails adjusted | 39 |
+| Critic confirmed | 198 |
+| Critic escalated to human | 20 |
 
 ## Top local risk signals
 
 | Reason code | Occurrences |
 |---|---|
 | `HIGH_TRANSACTION_BURST` | 68 |
-| `AI_DECISION_UNAVAILABLE` | 27 |
-| `ELEVATED_TRANSACTION_BURST` | 20 |
-| `RECENT_DEVICE_RESTART` | 2 |
-| `IP_INCONSISTENCY` | 2 |
+| `AI_DECISION_UNAVAILABLE` | 63 |
+| `ELEVATED_TRANSACTION_BURST` | 49 |
+| `RECENT_DEVICE_RESTART` | 13 |
+| `IP_INCONSISTENCY` | 13 |
+| `HIGH_VALUE_TRANSACTION` | 5 |
+| `ABNORMAL_PING_GAP` | 3 |
+| `EXCESSIVE_RETRIES` | 2 |
 
 ## Recent decisions
 
 | Logged at (UTC) | Transaction | Action | Confidence | Risk | Pattern |
 |---|---|---|---|---|---|
-| 18:22:23 | `c4ce81fc-5e4` | `soft_hold` | 0.78 | high | `card_testing` |
-| 18:22:42 | `2799b1c8-3a4` | `flag_for_review` | 0.62 | medium | `velocity_attack` |
-| 18:23:07 | `d6995672-754` | `flag_for_review` | 0.65 | medium | `velocity_attack` |
-| 18:23:25 | `4913f42b-d82` | `soft_hold` | 0.78 | high | `card_testing` |
-| 18:23:43 | `8e568549-c1b` | `flag_for_review` | 0 | medium | `unclear` |
-| 18:24:14 | `016b1bf4-54b` | `flag_for_review` | 0.62 | medium | `velocity_attack` |
-| 18:24:43 | `62668192-329` | `soft_hold` | 0.75 | high | `card_testing` |
-| 18:24:58 | `6ba5a794-8d0` | `flag_for_review` | 0.65 | medium | `velocity_attack` |
-| 18:25:13 | `88a6adc1-876` | `soft_hold` | 0.82 | high | `card_testing` |
-| 18:25:29 | `73f2eca7-a68` | `flag_for_review` | 0.65 | medium | `velocity_attack` |
-| 18:25:48 | `a6f29310-c27` | `flag_for_review` | 0.6 | medium | `velocity_attack` |
-| 18:26:05 | `fd4aa0dc-cb1` | `flag_for_review` | 0 | medium | `unclear` |
-| 18:27:09 | `65cfcfd5-e8b` | `soft_hold` | 0.78 | high | `card_testing` |
-| 18:27:39 | `750c6be3-60a` | `soft_hold` | 0.78 | high | `card_testing` |
-| 18:28:05 | `1ccbfe98-515` | `flag_for_review` | 0.65 | medium | `velocity_attack` |
+| 11:18:05 | `4ba57c63-4e0` | `dismiss` | 0.35 | low | `unclear` |
+| 11:19:07 | `2ab188ce-042` | `flag_for_review` | 0 | medium | `unclear` |
+| 11:19:12 | `11168d89-dba` | `flag_for_review` | 0 | medium | `unclear` |
+| 11:19:20 | `5fb60015-6a5` | `flag_for_review` | 0.55 | medium | `unusual_behavior` |
+| 11:19:28 | `73a0b1c3-862` | `flag_for_review` | 0.72 | high | `card_testing` |
+| 11:19:35 | `2c9f64d1-234` | `flag_for_review` | 0.78 | high | `card_testing` |
+| 11:19:42 | `41418917-f17` | `flag_for_review` | 0.78 | high | `card_testing` |
+| 11:19:52 | `b001377d-3c7` | `dismiss` | 0.35 | low | `unclear` |
+| 11:20:02 | `0842fe5e-d18` | `flag_for_review` | 0.65 | medium | `card_testing` |
+| 11:21:05 | `679d4b05-d40` | `dismiss` | 0.35 | low | `unclear` |
+| 11:21:11 | `6ac22c02-149` | `dismiss` | 0.4 | low | `unclear` |
+| 11:21:18 | `1d6ea3b0-9bc` | `dismiss` | 0.25 | low | `unclear` |
+| 11:21:25 | `bfa2d7ad-569` | `dismiss` | 0.35 | low | `unclear` |
+| 11:21:31 | `366229ca-06e` | `flag_for_review` | 0.58 | medium | `unusual_behavior` |
+| 11:21:39 | `7c27f656-6b8` | `dismiss` | 0.42 | low | `unusual_behavior` |

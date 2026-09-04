@@ -7,11 +7,16 @@ __pycache__/
 !data/sample_transactions_head.csv
 # Demo data so the deployed dashboard has flagged events
 !detection/flagged_events.csv
-audit_log/decisions.jsonl
 audit_log/alert_state.json
 audit_log/reviewed.json
+# Demo audit data so the deployed dashboard's Decision Audit Trail has entries
+!audit_log/decisions.jsonl
 agent/output.txt
+# Batch run logs (local-only)
+agent/batch_run*.log
 
 # Local-only files
 *.lnk
 .streamlit/
+# Pitch video script (local-only, not for GitHub)
+pitch_script.md
