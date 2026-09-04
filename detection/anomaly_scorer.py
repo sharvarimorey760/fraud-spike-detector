@@ -30,6 +30,11 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import IsolationForest
 
+try:
+    from detection.ring_detector import add_ring_features
+except ImportError:  # run directly from inside detection/
+    from ring_detector import add_ring_features
+
 
 # ---------------------------------------------------------------------
 # Isolation Forest features
@@ -406,6 +411,12 @@ def calculate_risk_score(df: pd.DataFrame) -> pd.DataFrame:
         0,
     )
 
+    # Ring signal: devices that are part of a suspicious community get
+    # a boost (up to +15) so coordinated abuse surfaces in the risk
+    # score even when the single transaction looks unremarkable.
+    if "ring_score" in df.columns:
+        score += 0.15 * df["ring_score"].fillna(0.0)
+
     df["risk_score"] = score.clip(0, 100).round(2)
 
     # -----------------------------------------------------------------
@@ -528,6 +539,13 @@ def build_risk_reasons(row):
             "IP consistency mismatch"
         )
 
+    if row.get("ring_score", 0) >= 40:
+        reasons.append(
+            f"device in suspected abuse ring "
+            f"({row.get('ring_community_id') or 'RING'}, "
+            f"{int(row.get('ring_size', 0))} devices)"
+        )
+
     if not reasons:
         reasons.append("No strong risk signals detected")
 
@@ -607,6 +625,10 @@ def score(
     # 2. Temporal signals
     print("→ Calculating temporal velocity signals...")
     df = add_temporal_features(df)
+
+    # 2b. Abuse-ring detection (community graph layer)
+    print("→ Detecting abuse rings (device community graph)...")
+    df = add_ring_features(df)
 
     # 3. Merchant baseline
     print("→ Calculating merchant baselines...")

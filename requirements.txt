@@ -1,6 +1,7 @@
 google-genai==2.20.0
 pandas==2.3.3
 scikit-learn==1.8.0
+networkx==3.6.1
 streamlit==1.62.0
 # Pinned explicitly so the resolver never falls back to an old pillow
 # sdist (no Python 3.14 wheel -> source build -> zlib failure on hosts).

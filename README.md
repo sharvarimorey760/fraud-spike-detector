@@ -23,6 +23,11 @@ recommend a bounded, explainable action.
    (detection/)        ping_gap, uptime, ip_consistency, 5-min burst rate
           |
           v
+[Abuse-Ring Detector]  <-- device similarity graph + Louvain community
+   (detection/)            detection; co-located/bursty device clusters
+                           add a ring_score signal to the risk score
+          |
+          v
    [flagged events]
           |
           v
@@ -102,6 +107,9 @@ python generate_synthetic_data.py --rows 3000 --fraud_rate 0.03 --out transactio
 cd ../detection
 python anomaly_scorer.py --in ../data/transactions.csv --out flagged_events.csv --contamination 0.10
 
+#    Model evaluation — confusion matrix, ROC-AUC, threshold sweep:
+python model_eval.py --in ../data/transactions.csv --out eval_report.md
+
 # 3. Run the agent on a flagged event
 cd ../agent
 python agent_loop.py --event_index 0
@@ -138,21 +146,50 @@ python audit_log/summary_report.py --out report.md
 python audit_log/summary_report.py --since 2026-09-03T16:00  # subset
 ```
 
+## Decision metrics & business impact
+
+Joins the audit log with ground-truth labels to answer two questions the
+track brief cares about — how accurate were the agent's decisions, and
+where is the cheapest operating point:
+
+```bash
+python audit_log/metrics_report.py                        # console
+python audit_log/metrics_report.py --out metrics.md       # save
+python audit_log/metrics_report.py --fp-cost 50 --fn-cost 500   # your costs
+```
+
+The report includes a confusion matrix, precision/recall/F1 of the agent's
+decisions vs ground truth, and a **business-impact simulator** that sweeps
+the confidence cutoff and reports total cost (FP × fp_cost + FN × fn_cost +
+reviews × review_cost) with the optimal operating point.
+
+> Honesty note: the audit log only covers events the detector already
+> flagged, so decision metrics are conditional on the detector — pair them
+> with `detection/model_eval.py` for the full-pipeline picture.
+
 ## Example: detector performance (honest metrics)
 
-Run on 3,365 synthetic transactions (365 true fraud rows across 4 patterns:
+Run on 3,343 synthetic transactions (343 true fraud rows across 4 patterns:
 card_testing, device_spoof, bust_out, retry_storm):
 
-| Contamination setting | Flagged | Recall | False positives |
-|---|---|---|---|
-| 0.04 | 135 | 37.0% | 0 |
-| 0.10 | 337 | 90.7% | 6 |
+| Metric | Value |
+|---|---|
+| Flagged candidates | 404 (12.1%) |
+| Recall (fraud caught) | 92.1% |
+| Precision | 78.2% |
+| False positives | 88 |
+| ROC-AUC (risk score) | 0.97 |
 
-This is a real precision/recall tradeoff, not a cherry-picked number — lower
-contamination misses more fraud but has zero noise; higher contamination
-catches nearly all fraud at the cost of a small false-positive rate that a
-human reviewer (via the `flag_for_review` / `escalate` split) would need to
-triage.
+Full evaluation — confusion matrix, ROC-AUC, and the risk-score threshold
+sweep — is one command: `python detection/model_eval.py --out eval_report.md`.
+The sweep shows the honest precision/recall tradeoff across cutoffs (e.g. at
+cutoff 30: precision 0.86 / recall 0.93; at cutoff 60: precision 1.0 /
+recall 0.44), so the flag bar is a choice backed by numbers, not a guess.
+
+A lower flag bar catches more fraud at the cost of false positives a human
+reviewer (via the `flag_for_review` / `escalate` split) would need to
+triage — the `metrics_report.py` simulator turns that tradeoff into a rupee
+number.
 
 ## Example: agent decision
 
@@ -186,9 +223,9 @@ committed demo data keeps the dashboard fully populated regardless.
 
 - Data is synthetic. Real fraud patterns are noisier and more adversarial —
   the anomaly thresholds here would need retuning against real distribution.
-- The agent currently investigates one flagged event at a time; a production
-  version should batch and correlate across devices/merchants (e.g. detect a
-  coordinated abuse ring, not just one bad device).
+- Ring detection uses geo-city + firmware + co-activity as device edges; a
+  production version should add shared IP/CVV/device-fingerprint edges and
+  re-tune community scoring against real fraud rings.
 - No feedback loop yet — confirmed false positives/negatives from human
   review aren't fed back to retrain the anomaly scorer.
 - Guardrail thresholds (0.5 confidence cutoff) are a reasonable starting
