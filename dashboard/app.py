@@ -922,7 +922,7 @@ def load_telemetry():
     total = len(df)
     flagged_count = len(flagged)
 
-    pending_list = get_pending_review(limit=200)
+    pending_list = get_pending_review(limit=5000)
     pending_count = len(pending_list)
 
     if not flagged.empty and "risk_score" in flagged.columns:
@@ -1402,12 +1402,12 @@ elif nav_option == "👤 Human Review":
     st.markdown("## 👤 Analyst Human Review Queue")
     st.caption("Decisions held or escalated by the AI & guardrail policies, awaiting sign-off.")
 
-    pending_items = get_pending_review(limit=100)
+    pending_items = get_pending_review(limit=1000)
     if not pending_items:
         st.success("✅ All flagged decisions have been signed off. Nothing pending.")
     else:
         st.warning(f"⚠️ {len(pending_items)} decision(s) require analyst sign-off.")
-        for idx, item in enumerate(pending_items):
+        for idx, item in enumerate(pending_items[:100]):
             dec = item.get("decision", {})
             tid = item.get("transaction_id", f"item-{idx}")
             unique = f"{idx}_{item.get('logged_at', '')}"

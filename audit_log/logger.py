@@ -88,4 +88,11 @@ def get_pending_review(limit: int = 100):
         and str(entry.get("transaction_id")) not in reviewed
     ]
 
-    return pending[-limit:]
+    # A transaction can be re-investigated and logged multiple times;
+    # keep only the latest pending entry per transaction ID so the
+    # review queue doesn't show duplicate IDs or over-count them.
+    latest_by_txn: dict = {}
+    for entry in pending:
+        latest_by_txn[str(entry.get("transaction_id"))] = entry
+
+    return list(latest_by_txn.values())[-limit:]
