@@ -95,7 +95,10 @@ _VOICE_MIC_TEMPLATE = """
       width:40px;height:40px;border-radius:50%;flex-shrink:0;
       background:#0B131E;border:1px solid #162436;color:#00D9FF;
       font-size:17px;cursor:pointer;display:flex;align-items:center;justify-content:center;
-      transition:all .15s ease;">🎤</button>
+      transition:all .15s ease;">
+        <svg xmlns="http://www.w3.org/2000/svg" width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="display:block;pointer-events:none;">
+          <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.91-3c-.49 0-.9.36-.98.85C16.52 14.2 14.47 16 12 16s-4.52-1.8-4.93-4.15c-.08-.49-.49-.85-.98-.85-.61 0-1.09.54-1 1.14.49 3 2.89 5.35 5.91 5.78V20c0 .55.45 1 1 1s1-.45 1-1v-2.08c3.02-.43 5.42-2.78 5.91-5.78.1-.6-.39-1.14-1-1.14z"/>
+        </svg></button>
   <span id="mic-status" style="font-size:11px;color:#64748B;font-family:Inter,sans-serif;"></span>
 </div>
 <script>
@@ -1288,7 +1291,7 @@ elif nav_option == "🚩 Flagged Events":
             search_label = "Search Merchant, Device, Transaction ID"
             search_query = st.text_input(
                 search_label,
-                placeholder="Type, press Enter, or tap 🎤...",
+                placeholder="Type, press Enter, or tap the mic button...",
             )
         with f3:
             render_voice_search_mic(search_label)
@@ -1383,7 +1386,7 @@ elif nav_option == "📜 Audit Log":
 elif nav_option == "🔍 Single Investigation":
     st.markdown("## 🔍 Live Multi-Agent Investigation")
     st.caption("Runs the full pipeline: local risk enrichment → investigator agent → critic agent → guardrails → audit trail.")
-    st.caption("🎤 Voice fill works in Chrome/Edge — the first time you click a mic, the browser asks for Microphone access. Click **Allow**.")
+    st.caption("Voice fill works in Chrome/Edge — the first time you click a mic, the browser asks for Microphone access. Click **Allow**.")
 
     api_key = os.environ.get("GEMINI_API_KEY")
     try:
@@ -1395,7 +1398,7 @@ elif nav_option == "🔍 Single Investigation":
     with st.form("single_form"):
         c1, c2 = st.columns(2)
         with c1:
-            # Voice fill for the free-text fields (🎤 uses the same Web
+            # Voice fill for the free-text fields (uses the same Web
             # Speech API mic as the Flagged Events search).
             d1, mic1 = st.columns([5, 1])
             with d1:
@@ -1477,7 +1480,7 @@ elif nav_option == "🔍 Single Investigation":
 elif nav_option == "⚡ Batch Investigation":
     st.markdown("## ⚡ Batch Investigation")
     st.caption("Upload a CSV, pick an existing one, or run against the currently flagged set.")
-    st.caption("🎤 The mic fills the CSV-path field — Chrome/Edge only, and the browser must be allowed Microphone access.")
+    st.caption("The mic fills the CSV-path field — Chrome/Edge only, and the browser must be allowed Microphone access.")
 
     source = st.radio(
         "Batch source",
