@@ -211,6 +211,80 @@ def render_voice_search_mic(target_label: str, height: int = 96):
     embed_iframe(html_code, height=height)
 
 
+_SPEAK_TEMPLATE = """
+<div style="display:flex;flex-direction:column;align-items:flex-start;gap:4px;">
+  <button id="speak-btn" title="Read aloud" type="button" style="
+      display:inline-flex;align-items:center;gap:7px;padding:7px 14px;
+      border-radius:8px;flex-shrink:0;cursor:pointer;
+      background:#0B131E;border:1px solid #162436;color:#00D9FF;
+      font-size:13px;font-family:Inter,sans-serif;font-weight:500;
+      transition:all .15s ease;">
+    <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="display:block;pointer-events:none;">
+      <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
+    </svg>
+    <span id="speak-label">Read aloud</span>
+  </button>
+  <span id="speak-status" style="font-size:11px;color:#64748B;font-family:Inter,sans-serif;"></span>
+</div>
+<script>
+(function() {
+  const btn = document.getElementById('speak-btn');
+  const label = document.getElementById('speak-label');
+  const status = document.getElementById('speak-status');
+  const text = __SPEAK_TEXT__;
+  let speaking = false;
+
+  function stop() {
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+    speaking = false;
+    btn.style.background = '#0B131E';
+    btn.style.borderColor = '#162436';
+    label.textContent = 'Read aloud';
+    status.textContent = '';
+  }
+
+  if (!('speechSynthesis' in window)) {
+    btn.disabled = true;
+    btn.style.opacity = 0.4;
+    status.textContent = 'Speech synthesis not supported in this browser';
+    return;
+  }
+
+  btn.addEventListener('click', () => {
+    if (speaking) { stop(); return; }
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'en-IN';
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+    utterance.onstart = () => {
+      speaking = true;
+      btn.style.background = '#FF4D67';
+      btn.style.borderColor = '#FF4D67';
+      label.textContent = 'Stop';
+      status.textContent = 'Speaking...';
+    };
+    utterance.onend = stop;
+    utterance.onerror = stop;
+    window.speechSynthesis.speak(utterance);
+  });
+})();
+</script>
+"""
+
+
+def render_speak_button(text: str, height: int = 74):
+    """Read-aloud button using the browser's built-in speechSynthesis
+    (Chrome/Edge — no backend, no API key, nothing sent to a server).
+
+    The text is JSON-embedded so quotes/newlines in decision summaries
+    can never break out of the script block.
+    """
+    payload = json.dumps(text, ensure_ascii=False)
+    html_code = _SPEAK_TEMPLATE.replace("__SPEAK_TEXT__", payload)
+    embed_iframe(html_code, height=height)
+
+
 # ============================================================
 # 3D CYBER GLASSMORPHISM STYLESHEET
 # ============================================================
@@ -1376,6 +1450,19 @@ elif nav_option == "📜 Audit Log":
                 if dec.get("recommended_remediation"):
                     st.info(f"**Remediation:** {dec.get('recommended_remediation')}")
                 st.json(dec)
+
+                # AI voice: read the decision reasoning aloud.
+                speak_text = (
+                    f"Recommended action: {dec.get('recommended_action', 'flag for review')}. "
+                    f"Fraud pattern: {dec.get('fraud_type_guess', 'unknown')}. "
+                    f"Confidence: {dec.get('confidence', 0)}. "
+                    f"Reasoning: {dec.get('reasoning_summary', 'No reasoning recorded.')}"
+                )
+                if dec.get("critic_summary"):
+                    speak_text += f" Critic verdict: {dec.get('critic_summary')}"
+                if dec.get("recommended_remediation"):
+                    speak_text += f" Recommended remediation: {dec.get('recommended_remediation')}"
+                render_speak_button(speak_text)
     else:
         st.info("No audit logs found yet. Run an investigation to generate entries.")
 
@@ -1470,6 +1557,19 @@ elif nav_option == "🔍 Single Investigation":
                     if decision.get("recommended_remediation"):
                         st.info(f"**Remediation:** {decision.get('recommended_remediation')}")
                     st.json(decision)
+
+                    # AI voice: read the investigation outcome aloud.
+                    speak_text = (
+                        f"Investigation complete. Recommended action: {act}. "
+                        f"Fraud pattern: {decision.get('fraud_type_guess', 'unknown')}. "
+                        f"Confidence: {decision.get('confidence', 0)}. "
+                        f"Reasoning: {decision.get('reasoning_summary', 'No reasoning recorded.')}"
+                    )
+                    if decision.get("critic_summary"):
+                        speak_text += f" Critic verdict: {decision.get('critic_summary')}"
+                    if decision.get("recommended_remediation"):
+                        speak_text += f" Recommended remediation: {decision.get('recommended_remediation')}"
+                    render_speak_button(speak_text)
                 except Exception as e:
                     st.error(f"Investigation failed: {e}")
 
@@ -1538,6 +1638,48 @@ elif nav_option == "⚡ Batch Investigation":
             "use the CLI: `python agent_loop.py --all --limit N`, which paces calls "
             "to stay within the Gemini free-tier rate limit."
         )
+
+        # AI voice: read the batch outcomes aloud (from the audit log
+        # for these transactions when available, else a batch summary).
+        if "transaction_id" in batch_df.columns:
+            batch_ids = set(batch_df["transaction_id"].astype(str))
+            batch_logs = [
+                e for e in read_recent_logs(limit=300)
+                if str(e.get("transaction_id")) in batch_ids
+            ]
+            if batch_logs:
+                lines = [
+                    f"Batch of {len(batch_logs)} investigated events. "
+                ]
+                for e in batch_logs[-5:]:
+                    d = e.get("decision", {})
+                    lines.append(
+                        f"Event {str(e.get('transaction_id'))[:8]}: "
+                        f"recommended {d.get('recommended_action', 'flag for review')}, "
+                        f"fraud pattern {d.get('fraud_type_guess', 'unknown')}, "
+                        f"confidence {d.get('confidence', 0)}. "
+                        f"{d.get('reasoning_summary', '')}"
+                    )
+                render_speak_button(" ".join(lines))
+            else:
+                top = batch_df.head(5)
+                summary = (
+                    f"Batch loaded with {len(batch_df)} flagged events. "
+                    f"Top events by risk: "
+                )
+                parts = []
+                for _, row in top.iterrows():
+                    parts.append(
+                        f"merchant {row.get('merchant_id', 'unknown')}, "
+                        f"device {row.get('device_id', 'unknown')}, "
+                        f"risk score {row.get('risk_score', 'unknown')}"
+                    )
+                summary += "; ".join(parts) + ". "
+                summary += (
+                    "No AI outcomes logged yet for this batch. "
+                    "Run the batch investigation to generate decisions."
+                )
+                render_speak_button(summary)
 
 
 # ============================================================
