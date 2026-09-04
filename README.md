@@ -137,8 +137,10 @@ the daily quota resets.
 
 ## Audit report
 
-Every decision is logged to `audit_log/decisions.jsonl` (append-only,
-git-ignored). Summarize the log as markdown at any time:
+Every decision is logged to `audit_log/decisions.jsonl` (append-only;
+currently ignored entries are `alert_state.json` and `reviewed.json` — a
+snapshot of `decisions.jsonl` is committed as demo data so the deployed
+dashboard's Decision Audit Trail is populated out of the box). Summarize the log as markdown at any time:
 
 ```bash
 python audit_log/summary_report.py                # print to console
