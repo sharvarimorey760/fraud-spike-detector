@@ -939,11 +939,15 @@ def save_api_key_to_env(var_name: str, api_key: str):
 
 
 def current_api_key_hint(var_name: str = "GEMINI_API_KEY") -> str:
-    """Masked summary of which key is active, for the Settings page."""
+    """Non-revealing status line for the Settings page.
+
+    Deliberately shows nothing about the key itself — not even a
+    fragment or its length. The key lives only in the local .env /
+    Streamlit secrets and is never displayed in the UI."""
     key = os.environ.get(var_name, "")
     if not key:
         return "No API key configured yet."
-    return f"Active key ends in **…{key[-4:]}** (length {len(key)})"
+    return "✅ API key configured — stored locally, never displayed"
 
 
 def resolve_llm_provider() -> str:
