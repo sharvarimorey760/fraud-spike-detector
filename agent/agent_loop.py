@@ -22,8 +22,6 @@ import time
 from datetime import datetime, timezone
 
 import pandas as pd
-from google import genai
-from google.genai import types
 
 from tools import TOOL_SCHEMA, TOOL_DISPATCH, load_dataset
 from prompts import (
@@ -32,11 +30,12 @@ from prompts import (
     CRITIC_SYSTEM_PROMPT,
     build_critic_prompt,
 )
+from llm_client import build_client, resolve_provider
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from env_loader import load_dotenv  # noqa: E402
 
-# Load GEMINI_API_KEY (and any other secrets) from the project's .env
+# Load the API keys (and any other secrets) from the project's .env
 # file, if present. Real environment variables are never overridden.
 load_dotenv()
 
@@ -44,23 +43,7 @@ from guardrails.risk_gate import apply_guardrails  # noqa: E402
 from guardrails.alert_cooldown import apply_cooldown  # noqa: E402
 from audit_log.logger import log_decision  # noqa: E402
 
-
-def _load_configured_model():
-    """Read a model override from config.json (written by the dashboard's
-    Settings tab) if present, otherwise fall back to the default."""
-    config_path = os.path.join(os.path.dirname(__file__), "..", "config.json")
-    if os.path.exists(config_path):
-        try:
-            with open(config_path) as f:
-                cfg = json.load(f)
-            return cfg.get("model", "gemini-3.5-flash-lite")
-        except (json.JSONDecodeError, OSError):
-            pass
-    return "gemini-3.5-flash-lite"
-
-
-MODEL = _load_configured_model()
-# Cap investigator tool-call round trips: each turn is a separate Gemini
+# Cap investigator tool-call round trips: each turn is a separate LLM
 # API call, so a lower cap means faster investigations (at the cost of a
 # shallower evidence-gathering pass before the agent must conclude).
 MAX_TOOL_TURNS = 3
@@ -72,28 +55,34 @@ MAX_SEND_ATTEMPTS = 6
 
 
 def _is_rate_limited(exc: Exception) -> bool:
-    """True for Gemini 429 quota errors (RESOURCE_EXHAUSTED)."""
+    """True for provider 429 quota errors (RESOURCE_EXHAUSTED too)."""
     text = str(exc)
     return "429" in text or "RESOURCE_EXHAUSTED" in text
 
 
 def _retry_wait_seconds(exc: Exception, fallback: float = 60.0) -> float:
-    """Prefer the server-suggested delay ('Please retry in 43.9s')."""
-    match = re.search(r"retry in ([\d.]+)s", str(exc))
+    """Prefer the server-suggested delay (Gemini: 'retry in 43.9s';
+    OpenRouter: 'retry after 31s' in the error detail)."""
+    match = re.search(
+        r"retry(?: after| in| -after) ([\d.]+)s?",
+        str(exc),
+        re.IGNORECASE,
+    )
     if match:
         return min(float(match.group(1)) + 2.0, 180.0)
     return fallback
 
 
-def send_with_retry(chat, message):
-    """Send a chat message, retrying on Gemini 429 rate limits and 503s.
+def send_with_retry(send_fn, message):
+    """Call send_fn(message), retrying on 429 rate limits and 503s.
 
     On 429 we sleep the server-suggested delay and retry rather than
-    letting the quota error kill the entire --all batch.
+    letting the quota error kill the entire --all batch. send_fn is
+    either chat.send (initial prompt) or chat.send_tool_results.
     """
     for attempt in range(MAX_SEND_ATTEMPTS):
         try:
-            return chat.send_message(message)
+            return send_fn(message)
         except Exception as exc:
             if _is_rate_limited(exc):
                 wait = _retry_wait_seconds(exc)
@@ -113,18 +102,6 @@ def send_with_retry(chat, message):
     raise RuntimeError(
         "Repeated 429 rate limits; giving up on this event."
     )
-
-
-GEMINI_TOOLS = types.Tool(
-    function_declarations=[
-        types.FunctionDeclaration(
-            name=t["name"],
-            description=t["description"],
-            parameters=t["parameters"],
-        )
-        for t in TOOL_SCHEMA
-    ]
-)
 
 
 def clamp(value, minimum=0, maximum=100):
@@ -277,74 +254,59 @@ def normalize_decision(decision: dict) -> dict:
     return normalized
 
 
-def run_agent(client: genai.Client, event: dict) -> dict:
+def run_agent(client, event: dict) -> dict:
     enriched_event = enrich_event(event)
 
-    chat = client.chats.create(
-        model=MODEL,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            tools=[GEMINI_TOOLS],
-            temperature=0.1,
-        ),
+    chat = client.start_chat(
+        system=SYSTEM_PROMPT,
+        tools=TOOL_SCHEMA,
+        temperature=0.1,
     )
 
     response = send_with_retry(
-        chat,
+        chat.send,
         build_investigation_prompt(enriched_event),
     )
 
     for _ in range(MAX_TOOL_TURNS):
-        if not response.candidates:
+        tool_calls = response.tool_calls
+
+        if not response.text and not tool_calls:
             return fallback_decision(
-                "Gemini returned no investigation candidates."
+                "LLM returned no investigation response."
             )
 
-        parts = response.candidates[0].content.parts
+        if tool_calls:
+            tool_results = []
 
-        function_calls = [
-            part.function_call
-            for part in parts
-            if getattr(part, "function_call", None)
-        ]
-
-        if function_calls:
-            function_response_parts = []
-
-            for call in function_calls:
-                fn = TOOL_DISPATCH.get(call.name)
+            for call in tool_calls:
+                fn = TOOL_DISPATCH.get(call["name"])
 
                 if fn:
                     try:
-                        result = fn(dict(call.args))
+                        result = fn(call["args"])
                     except Exception as exc:
                         result = {
                             "error": f"Tool execution failed: {str(exc)}"
                         }
                 else:
                     result = {
-                        "error": f"Unknown tool: {call.name}"
+                        "error": f"Unknown tool: {call['name']}"
                     }
 
-                function_response_parts.append(
-                    types.Part.from_function_response(
-                        name=call.name,
-                        response={"result": result},
-                    )
-                )
+                tool_results.append({
+                    "name": call["name"],
+                    "response": result,
+                })
 
             response = send_with_retry(
-                chat,
-                function_response_parts,
+                chat.send_tool_results,
+                tool_results,
             )
 
             continue
 
-        final_text = (
-            response.text.strip()
-            if response.text
-            else ""
-        )
+        final_text = response.text.strip() if response.text else ""
 
         decision = parse_decision(final_text)
         decision.setdefault(
@@ -363,25 +325,22 @@ def run_agent(client: genai.Client, event: dict) -> dict:
 
 
 def run_critic(
-    client: genai.Client,
+    client,
     event: dict,
     investigator_decision: dict,
 ) -> dict:
 
-    # Use the chat API (like the investigator) rather than
-    # Models.generate_content: the SDK warns against direct AFC-style
-    # generate_content calls. No tools are passed, so the critic still
-    # cannot call anything — it only reviews the given decision.
-    chat = client.chats.create(
-        model=MODEL,
-        config=types.GenerateContentConfig(
-            system_instruction=CRITIC_SYSTEM_PROMPT,
-            temperature=0.1,
-        ),
+    # The critic uses the same chat interface as the investigator, but
+    # without tools — it cannot call anything, it only reviews the given
+    # decision.
+    chat = client.start_chat(
+        system=CRITIC_SYSTEM_PROMPT,
+        tools=None,
+        temperature=0.1,
     )
 
     response = send_with_retry(
-        chat,
+        chat.send,
         build_critic_prompt(
             event,
             investigator_decision,
@@ -630,17 +589,24 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    api_key = os.environ.get("GEMINI_API_KEY")
+    provider = resolve_provider()
+    key_var = (
+        "OPENROUTER_API_KEY"
+        if provider == "openrouter"
+        else "GEMINI_API_KEY"
+    )
+    api_key = os.environ.get(key_var)
 
     if not api_key:
         print(
-            "ERROR: set GEMINI_API_KEY in your environment "
-            "before running the agent."
+            f"ERROR: set {key_var} in your environment "
+            f"before running the agent (provider: {provider})."
         )
         sys.exit(1)
 
-    client = genai.Client(
-        api_key=api_key
+    client = build_client(
+        api_key=api_key,
+        provider=provider,
     )
 
     load_dataset(args.data)

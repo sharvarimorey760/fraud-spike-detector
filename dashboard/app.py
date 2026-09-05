@@ -871,6 +871,7 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
 DEFAULT_CONFIG = {
     "model": "gemini-3.5-flash-lite",
+    "llm_provider": "gemini",
     "contamination": 0.10,
     "cooldown_minutes": 15,
     "min_escalate_confidence": 0.85,
@@ -893,6 +894,94 @@ def load_config():
 def save_config(cfg: dict):
     with open(CONFIG_PATH, "w") as f:
         json.dump(cfg, f, indent=2)
+
+
+def save_api_key_to_env(var_name: str, api_key: str):
+    """Persist an API key (e.g. GEMINI_API_KEY / OPENROUTER_API_KEY) to
+    the project's .env (gitignored) and activate it in the current process.
+
+    .env is the one gitignored file the agent/CLI already read via
+    env_loader, so a key saved here works for single investigations,
+    batch runs, and `python agent_loop.py` alike. Real environment
+    variables are never overwritten by .env, so we also set os.environ
+    directly for the running session. On Streamlit Cloud the container
+    filesystem is ephemeral — use Secrets there for persistence.
+    """
+    env_path = os.path.join(BASE_DIR, ".env")
+    lines = []
+    if os.path.exists(env_path):
+        try:
+            with open(env_path, encoding="utf-8") as f:
+                lines = f.readlines()
+        except OSError:
+            lines = []
+
+    entry = f"{var_name}={api_key}\n"
+    replaced = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key == var_name:
+                lines[i] = entry
+                replaced = True
+                break
+    if not replaced:
+        lines.append(entry)
+
+    try:
+        with open(env_path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        os.environ[var_name] = api_key
+        return True
+    except OSError:
+        return False
+
+
+def current_api_key_hint(var_name: str = "GEMINI_API_KEY") -> str:
+    """Masked summary of which key is active, for the Settings page."""
+    key = os.environ.get(var_name, "")
+    if not key:
+        return "No API key configured yet."
+    return f"Active key ends in **…{key[-4:]}** (length {len(key)})"
+
+
+def resolve_llm_provider() -> str:
+    """Active LLM provider: config.json wins, otherwise auto-detect from
+    whichever API key is present (env var, then Streamlit Cloud secrets),
+    defaulting to gemini."""
+    try:
+        provider = load_config().get("llm_provider", "")
+    except Exception:
+        provider = ""
+    if provider in ("gemini", "openrouter"):
+        return provider
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return "openrouter"
+    try:
+        if st.secrets.get("OPENROUTER_API_KEY"):
+            return "openrouter"
+    except Exception:
+        pass
+    return "gemini"
+
+
+def resolve_api_key() -> str:
+    """API key for the active provider, env var first, then Streamlit
+    Cloud secrets."""
+    provider = resolve_llm_provider()
+    var = (
+        "OPENROUTER_API_KEY"
+        if provider == "openrouter"
+        else "GEMINI_API_KEY"
+    )
+    key = os.environ.get(var, "")
+    if not key:
+        try:
+            key = st.secrets.get(var, "")
+        except Exception:
+            key = ""
+    return key
 
 
 # ============================================================
@@ -1476,12 +1565,7 @@ elif nav_option == "🔍 Single Investigation":
     st.caption("Runs the full pipeline: local risk enrichment → investigator agent → critic agent → guardrails → audit trail.")
     st.caption("Voice fill works in Chrome/Edge — the first time you click a mic, the browser asks for Microphone access. Click **Allow**.")
 
-    api_key = os.environ.get("GEMINI_API_KEY")
-    try:
-        if not api_key:
-            api_key = st.secrets.get("GEMINI_API_KEY")
-    except Exception:
-        pass
+    api_key = resolve_api_key()
 
     with st.form("single_form"):
         c1, c2 = st.columns(2)
@@ -1514,7 +1598,11 @@ elif nav_option == "🔍 Single Investigation":
 
     if submitted:
         if not api_key:
-            st.error("No GEMINI_API_KEY found. Set it as an environment variable, or add it under Streamlit Cloud Secrets.")
+            st.error(
+                "No API key found for the selected provider. Set it in "
+                "⚙️ Settings, as an environment variable, or under Streamlit "
+                "Cloud Secrets (GEMINI_API_KEY / OPENROUTER_API_KEY)."
+            )
         elif agent_loop_module is None:
             st.error(
                 "The real agent module (agent/agent_loop.py) could not be imported, so no "
@@ -1524,8 +1612,11 @@ elif nav_option == "🔍 Single Investigation":
         else:
             with st.spinner("Investigator and critic agents are analyzing telemetry..."):
                 try:
-                    from google import genai
-                    client = genai.Client(api_key=api_key)
+                    from llm_client import build_client
+                    client = build_client(
+                        api_key,
+                        provider=resolve_llm_provider(),
+                    )
 
                     event = {
                         "transaction_id": str(uuid.uuid4()),
@@ -1716,17 +1807,13 @@ elif nav_option == "⚡ Batch Investigation":
         )
 
         if run_clicked:
-            batch_api_key = os.environ.get("GEMINI_API_KEY")
-            try:
-                if not batch_api_key:
-                    batch_api_key = st.secrets.get("GEMINI_API_KEY")
-            except Exception:
-                pass
+            batch_api_key = resolve_api_key()
 
             if not batch_api_key:
                 st.error(
-                    "No GEMINI_API_KEY found. Set it as an environment variable, "
-                    "or add it under Streamlit Cloud Secrets."
+                    "No API key found for the selected provider. Set it in "
+                    "⚙️ Settings, as an environment variable, or under Streamlit "
+                    "Cloud Secrets (GEMINI_API_KEY / OPENROUTER_API_KEY)."
                 )
             elif agent_loop_module is None:
                 st.error(
@@ -1734,8 +1821,11 @@ elif nav_option == "⚡ Batch Investigation":
                     "imported, so no investigation can be run."
                 )
             else:
-                from google import genai
-                batch_client = genai.Client(api_key=batch_api_key)
+                from llm_client import build_client
+                batch_client = build_client(
+                    batch_api_key,
+                    provider=resolve_llm_provider(),
+                )
                 if tools_load_dataset and os.path.exists(DATA_PATH):
                     tools_load_dataset(DATA_PATH)
 
@@ -1988,13 +2078,45 @@ elif nav_option == "⚙️ Settings":
         s1, s2 = st.columns(2)
 
         with s1:
-            st.markdown("#### AI Model")
-            model_choice = st.selectbox(
-                "Gemini model",
-                ["gemini-3.5-flash-lite", "gemini-2.5-flash-lite", "gemini-3.6-flash"],
-                index=0 if cfg["model"] not in ["gemini-2.5-flash-lite", "gemini-3.6-flash"] else
-                      ["gemini-3.5-flash-lite", "gemini-2.5-flash-lite", "gemini-3.6-flash"].index(cfg["model"]),
+            st.markdown("#### AI Model & Key")
+            provider_choice = st.selectbox(
+                "LLM provider",
+                ["gemini", "openrouter"],
+                index=0 if cfg.get("llm_provider", "gemini") != "openrouter" else 1,
+                help="gemini = Google key (GEMINI_API_KEY). openrouter = one key for "
+                     "many models, including free ones, via openrouter.ai "
+                     "(OPENROUTER_API_KEY).",
             )
+            model_default = cfg["model"]
+            if provider_choice == "openrouter" and "gemini" in model_default.lower():
+                model_default = ""
+            model_input = st.text_input(
+                "Model",
+                value=model_default,
+                placeholder=(
+                    "gemini-3.5-flash-lite"
+                    if provider_choice != "openrouter"
+                    else "google/gemini-2.5-flash-lite:free"
+                ),
+                help="Gemini: e.g. gemini-3.5-flash-lite. OpenRouter: any slug, "
+                     "e.g. google/gemini-2.5-flash-lite:free or "
+                     "deepseek/deepseek-chat:free — free OpenRouter models end "
+                     "in ':free'.",
+            )
+            key_var = (
+                "OPENROUTER_API_KEY"
+                if provider_choice == "openrouter"
+                else "GEMINI_API_KEY"
+            )
+            api_key_input = st.text_input(
+                f"API key — {key_var} (optional)",
+                type="password",
+                placeholder="Paste a new key, or leave blank to keep the current one",
+                help="Saved to your gitignored .env and used by single investigations, "
+                     "batch runs, and the agent CLI. On Streamlit Cloud, prefer Secrets "
+                     "for persistence — this field only lasts for the session there.",
+            )
+            st.caption(current_api_key_hint(key_var))
             min_escalate_conf = st.slider("Minimum confidence for escalate", 0.5, 1.0, float(cfg["min_escalate_confidence"]))
 
         with s2:
@@ -2005,17 +2127,33 @@ elif nav_option == "⚙️ Settings":
         save_btn = st.form_submit_button("💾 Save configuration", use_container_width=True)
 
     if save_btn:
+        resolved_model = model_input.strip()
+        if not resolved_model:
+            resolved_model = (
+                "google/gemini-2.5-flash-lite:free"
+                if provider_choice == "openrouter"
+                else "gemini-3.5-flash-lite"
+            )
         new_cfg = {
-            "model": model_choice,
+            "model": resolved_model,
+            "llm_provider": provider_choice,
             "contamination": contamination,
             "cooldown_minutes": cooldown_mins,
             "min_escalate_confidence": min_escalate_conf,
         }
         save_config(new_cfg)
+
+        key_saved = ""
+        if api_key_input.strip():
+            ok = save_api_key_to_env(key_var, api_key_input.strip())
+            key_saved = (
+                " API key updated for single + batch investigations (saved to .env)."
+                if ok else
+                " Could not write the API key to .env — it is active for this session only."
+            )
+
         st.success(
-            f"Saved to config.json. Next run of anomaly_scorer.py will use "
-            f"contamination={contamination}, agent_loop.py will use model='{model_choice}', "
-            f"and the guardrail/cooldown layers will require ≥ {min_escalate_conf} "
-            f"confidence to escalate with a {cooldown_mins}-minute alert cooldown."
+            f"Saved to config.json. agent_loop.py will use provider='{provider_choice}' "
+            f"with model='{resolved_model}' (critic agent always enabled).{key_saved}"
         )
         st.json(new_cfg)
