@@ -60,7 +60,10 @@ def _load_configured_model():
 
 
 MODEL = _load_configured_model()
-MAX_TOOL_TURNS = 5
+# Cap investigator tool-call round trips: each turn is a separate Gemini
+# API call, so a lower cap means faster investigations (at the cost of a
+# shallower evidence-gathering pass before the agent must conclude).
+MAX_TOOL_TURNS = 3
 
 # Gemini free-tier quota is ~15 generate_content requests per minute; a
 # batch run makes 2+ calls per event (investigator + critic), so bursts

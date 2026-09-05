@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 import html as _html
@@ -1634,9 +1635,9 @@ elif nav_option == "⚡ Batch Investigation":
         st.dataframe(batch_df.head(20), use_container_width=True, hide_index=True)
         st.caption(
             "Full batch AI investigation runs one event at a time through the same "
-            "investigator + critic pipeline as Single Investigation. For a live demo, "
-            "use the CLI: `python agent_loop.py --all --limit N`, which paces calls "
-            "to stay within the Gemini free-tier rate limit."
+            "investigator + critic pipeline as Single Investigation. Use the run "
+            "controls below, or the CLI: `python agent_loop.py --all --limit N` "
+            "(the CLI paces calls to stay within the Gemini free-tier rate limit)."
         )
 
         # AI voice: read the batch outcomes aloud (from the audit log
@@ -1680,6 +1681,169 @@ elif nav_option == "⚡ Batch Investigation":
                     "Run the batch investigation to generate decisions."
                 )
                 render_speak_button(summary)
+
+        st.markdown("---")
+        st.markdown("### 🚀 Run batch investigation")
+        st.caption(
+            "Each event runs through the same pipeline as Single Investigation "
+            "(investigator agent → critic → guardrails) and is written to the "
+            "audit trail. Budget roughly 30–90s per event; on the Gemini free "
+            "tier, 429 rate limits are handled automatically with retry waits."
+        )
+
+        rc1, rc2 = st.columns(2)
+        with rc1:
+            run_limit = st.number_input(
+                "Events to investigate",
+                min_value=1,
+                max_value=int(len(batch_df)),
+                value=min(5, int(len(batch_df))),
+                step=1,
+            )
+        with rc2:
+            run_delay = st.number_input(
+                "Delay between events (sec)",
+                min_value=0.0,
+                max_value=60.0,
+                value=2.0,
+                step=0.5,
+            )
+
+        run_clicked = st.button(
+            "🚀 Run batch",
+            type="primary",
+            width="stretch",
+        )
+
+        if run_clicked:
+            batch_api_key = os.environ.get("GEMINI_API_KEY")
+            try:
+                if not batch_api_key:
+                    batch_api_key = st.secrets.get("GEMINI_API_KEY")
+            except Exception:
+                pass
+
+            if not batch_api_key:
+                st.error(
+                    "No GEMINI_API_KEY found. Set it as an environment variable, "
+                    "or add it under Streamlit Cloud Secrets."
+                )
+            elif agent_loop_module is None:
+                st.error(
+                    "The real agent module (agent/agent_loop.py) could not be "
+                    "imported, so no investigation can be run."
+                )
+            else:
+                from google import genai
+                batch_client = genai.Client(api_key=batch_api_key)
+                if tools_load_dataset and os.path.exists(DATA_PATH):
+                    tools_load_dataset(DATA_PATH)
+
+                events = batch_df.head(int(run_limit))
+                total = int(len(events))
+
+                status = st.status(
+                    "Batch investigation running...",
+                    expanded=True,
+                )
+                progress = st.progress(0.0, text=f"0/{total} events")
+
+                results = []
+                start_time = time.time()
+
+                for i, (_, row) in enumerate(events.iterrows()):
+                    event = row.to_dict()
+                    tid = str(event.get("transaction_id", f"event-{i + 1}"))
+
+                    progress.progress(
+                        i / total,
+                        text=f"Investigating {i + 1}/{total}: {tid}...",
+                    )
+                    status.write(f"🔍 Investigating `{tid}`")
+
+                    try:
+                        decision = agent_loop_module.process_event(
+                            batch_client,
+                            event,
+                        )
+                        results.append({
+                            "transaction_id": tid,
+                            "merchant_id": event.get("merchant_id", ""),
+                            "device_id": event.get("device_id", ""),
+                            "recommended_action": decision.get(
+                                "recommended_action", ""
+                            ),
+                            "fraud_type_guess": decision.get(
+                                "fraud_type_guess", ""
+                            ),
+                            "confidence": decision.get("confidence", ""),
+                            "alert_status": decision.get("alert_status", ""),
+                            "reasoning_summary": decision.get(
+                                "reasoning_summary", ""
+                            ),
+                            "critic_summary": decision.get(
+                                "critic_summary", ""
+                            ),
+                            "recommended_remediation": decision.get(
+                                "recommended_remediation", ""
+                            ),
+                        })
+                        status.write(
+                            f"✅ `{tid}` → "
+                            f"`{decision.get('recommended_action', '')}` "
+                            f"(confidence {decision.get('confidence', '')})"
+                        )
+                    except Exception as exc:
+                        status.write(f"❌ `{tid}` — failed: {exc}")
+
+                    if i < total - 1 and run_delay > 0:
+                        time.sleep(run_delay)
+
+                elapsed = time.time() - start_time
+                progress.progress(
+                    1.0,
+                    text=f"Done — {len(results)}/{total} events "
+                         f"in {elapsed:.0f}s",
+                )
+                status.update(
+                    label=f"Batch complete — {len(results)}/{total} events "
+                          f"in {elapsed:.0f}s",
+                    state="complete",
+                    expanded=False,
+                )
+
+                if results:
+                    st.success(
+                        f"Investigated {len(results)} events. All decisions "
+                        "logged to the audit trail."
+                    )
+                    results_df = pd.DataFrame(results)
+                    st.dataframe(
+                        results_df.drop(
+                            columns=[
+                                "reasoning_summary",
+                                "critic_summary",
+                                "recommended_remediation",
+                            ]
+                        ),
+                        hide_index=True,
+                        width="stretch",
+                    )
+                    for r in results:
+                        with st.expander(
+                            f"📋 {r['transaction_id']} — "
+                            f"{r['recommended_action'].upper()}"
+                        ):
+                            st.write(f"**Reasoning:** {r['reasoning_summary']}")
+                            if r["critic_summary"]:
+                                st.caption(
+                                    f"🛡️ Critic verdict: {r['critic_summary']}"
+                                )
+                            if r["recommended_remediation"]:
+                                st.info(
+                                    f"**Remediation:** "
+                                    f"{r['recommended_remediation']}"
+                                )
 
 
 # ============================================================
