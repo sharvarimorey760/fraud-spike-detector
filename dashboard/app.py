@@ -2094,6 +2094,11 @@ elif nav_option == "⚙️ Settings":
             model_default = cfg["model"]
             if provider_choice == "openrouter" and "gemini" in model_default.lower():
                 model_default = ""
+            elif provider_choice == "gemini" and "/" in model_default:
+                # Leftover OpenRouter slug from a previous provider
+                # switch — show the gemini default instead of a model
+                # name the Gemini API would reject.
+                model_default = ""
             model_input = st.text_input(
                 "Model",
                 value=model_default,
@@ -2138,6 +2143,10 @@ elif nav_option == "⚙️ Settings":
                 if provider_choice == "openrouter"
                 else "gemini-3.5-flash-lite"
             )
+        elif provider_choice == "gemini" and "/" in resolved_model:
+            # Never persist an OpenRouter slug for the gemini provider;
+            # the Gemini API only accepts plain gemini model names.
+            resolved_model = "gemini-3.5-flash-lite"
         new_cfg = {
             "model": resolved_model,
             "llm_provider": provider_choice,

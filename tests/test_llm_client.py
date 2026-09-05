@@ -87,6 +87,20 @@ class ResolveModelTest(unittest.TestCase):
                 "deepseek/deepseek-chat:free",
             )
 
+    def test_gemini_rejects_leftover_openrouter_slug(self):
+        # A provider switch back to gemini can leave an OpenRouter slug
+        # (contains '/') in config.json; the Gemini API would reject it
+        # as an unknown model, so resolve_model must fall back.
+        with mock.patch.object(
+            llm_client,
+            "_read_config",
+            return_value={"model": "google/gemini-2.5-flash-lite:free"},
+        ):
+            self.assertEqual(
+                llm_client.resolve_model("gemini"),
+                llm_client.DEFAULT_GEMINI_MODEL,
+            )
+
 
 class OpenAIToolsTest(unittest.TestCase):
     def test_schema_converts_to_function_tool(self):
@@ -208,6 +222,41 @@ class OpenRouterChatTest(unittest.TestCase):
         with mock.patch.object(llm_client, "_post_json", side_effect=fake_post):
             resp = chat.send("investigate")
         self.assertEqual(resp.tool_calls[0]["args"], {})
+
+
+class GeminiClientTest(unittest.TestCase):
+    """
+    Regression test: the underlying genai.Client must be kept alive for
+    the lifetime of the chat. Previously it was created as a temporary
+    inside start_chat(), garbage-collected immediately, and the returned
+    Chat then failed on send with "Cannot send a request, as the client
+    has been closed."
+    """
+
+    def test_start_chat_keeps_genai_client_alive(self):
+        fake_genai_client = mock.MagicMock()
+        fake_genai_client.chats.create.return_value = mock.MagicMock()
+
+        with mock.patch.object(llm_client, "genai") as fake_genai:
+            fake_genai.Client.return_value = fake_genai_client
+
+            wrapper = llm_client.GeminiClient(
+                api_key="test-key",
+                model="gemini-test",
+            )
+            chat = wrapper.start_chat("sys", tools=None, temperature=0.1)
+
+            # The wrapper must retain the genai.Client instead of
+            # letting it be collected (and closed) mid-conversation.
+            self.assertIs(wrapper._genai_client, fake_genai_client)
+
+            # A second chat reuses the same client rather than creating
+            # a fresh one each time.
+            wrapper.start_chat("sys2", tools=None, temperature=0.1)
+            self.assertEqual(fake_genai.Client.call_count, 1)
+
+            # The chat also holds its own reference to the client.
+            self.assertIs(chat._client, fake_genai_client)
 
 
 if __name__ == "__main__":

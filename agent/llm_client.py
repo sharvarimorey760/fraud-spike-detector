@@ -79,7 +79,11 @@ def resolve_model(provider: str = None) -> str:
 
     For OpenRouter we fall back to a free model slug whenever the
     configured model is missing or still a Gemini name (the Settings tab
-    starts from the old config, so the switch would otherwise break)."""
+    starts from the old config, so the switch would otherwise break).
+    Symmetrically, for Gemini we never send an OpenRouter-style slug
+    (contains '/') — the Settings tab can leave one behind after a
+    provider switch back to gemini, and the Gemini API would reject it
+    as an unknown model."""
     provider = provider or resolve_provider()
     model = str(_read_config().get("model", "") or "").strip()
 
@@ -88,7 +92,9 @@ def resolve_model(provider: str = None) -> str:
             return DEFAULT_OPENROUTER_MODEL
         return model
 
-    return model or DEFAULT_GEMINI_MODEL
+    if not model or "/" in model:
+        return DEFAULT_GEMINI_MODEL
+    return model
 
 
 def build_client(api_key: str = None, provider: str = None):
@@ -114,6 +120,13 @@ class GeminiClient:
     def __init__(self, api_key: str, model: str = None):
         self._api_key = api_key
         self._model = model or resolve_model("gemini")
+        # Hold the underlying genai.Client for the lifetime of this
+        # wrapper. google-genai's Client closes its HTTP transport when
+        # it is garbage-collected; creating the client inline inside
+        # start_chat() let it be collected immediately, and the returned
+        # Chat then failed on the next send with "Cannot send a request,
+        # as the client has been closed."
+        self._genai_client = None
 
     def start_chat(self, system: str, tools: list = None, temperature: float = 0.1):
         tool = None
@@ -128,7 +141,9 @@ class GeminiClient:
                     for t in tools
                 ]
             )
-        chat = genai.Client(api_key=self._api_key).chats.create(
+        if self._genai_client is None:
+            self._genai_client = genai.Client(api_key=self._api_key)
+        chat = self._genai_client.chats.create(
             model=self._model,
             config=types.GenerateContentConfig(
                 system_instruction=system,
@@ -136,12 +151,16 @@ class GeminiClient:
                 temperature=temperature,
             ),
         )
-        return GeminiChat(chat)
+        return GeminiChat(chat, self._genai_client)
 
 
 class GeminiChat:
-    def __init__(self, chat):
+    def __init__(self, chat, client=None):
         self._chat = chat
+        # Keep a reference to the genai.Client so it stays alive (and
+        # un-closed) for the whole conversation, even if the wrapper
+        # GeminiClient is dropped.
+        self._client = client
 
     def send(self, content) -> LLMResponse:
         return self._to_response(self._chat.send_message(content))
